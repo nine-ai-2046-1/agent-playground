@@ -137,10 +137,18 @@ function savePrivateKey(agent, pkcs8Base64) {
     node_fs_1.default.writeFileSync(fileKeyPath(agent), `${pkcs8Base64}\n`, { mode: 0o600 });
     return fileKeyPath(agent);
 }
+/** CI／容器用：私鑰可由環境變數注入（base64 PKCS#8），永不落碟 */
+function envPrivateKey() {
+    const raw = process.env.BROKER_PRIVATE_KEY;
+    if (!raw)
+        return null;
+    return raw.replace(/\s/g, "");
+}
 function loadPrivateKey(agent) {
-    const base64 = isMac ? keychainLoad(agent) : readFileQuiet(fileKeyPath(agent));
-    if (!base64)
-        die(`找唔到 agent「${agent}」嘅私鑰；先跑 \`broker init --agent ${agent}\``);
+    const base64 = envPrivateKey() || (isMac ? keychainLoad(agent) : readFileQuiet(fileKeyPath(agent)));
+    if (!base64) {
+        die(`找唔到 agent「${agent}」嘅私鑰；先跑 \`broker init --agent ${agent}\`，或設 BROKER_PRIVATE_KEY（base64 PKCS#8）`);
+    }
     return node_crypto_1.default.createPrivateKey({ key: Buffer.from(base64.replace(/\s/g, ""), "base64"), format: "der", type: "pkcs8" });
 }
 function readFileQuiet(file) {
@@ -241,7 +249,7 @@ function cmdInit(flags) {
         usageDie("agent id 只可以用細寫英數、. _ -，2–48 字元");
     const config = readConfig();
     const brokerUrl = (flagString(flags, "broker-url") || config.brokerUrl).replace(/\/+$/, "");
-    const existing = isMac ? keychainLoad(agentId) : readFileQuiet(fileKeyPath(agentId));
+    const existing = envPrivateKey() || (isMac ? keychainLoad(agentId) : readFileQuiet(fileKeyPath(agentId)));
     if (existing && !flags.force)
         die(`agent「${agentId}」已有私鑰；如要換新，加 --force（舊公鑰會即刻失效）`);
     const { pkcs8, rawPublic } = generateKeypair();
@@ -255,10 +263,12 @@ function cmdInit(flags) {
 }
 function cmdWhoami(config, flags) {
     const agent = resolveAgent(config, flags);
-    const hasKey = isMac ? Boolean(keychainLoad(agent)) : Boolean(readFileQuiet(fileKeyPath(agent)));
+    const fromEnv = Boolean(envPrivateKey());
+    const hasKey = fromEnv || (isMac ? Boolean(keychainLoad(agent)) : Boolean(readFileQuiet(fileKeyPath(agent))));
     console.log(`agent   : ${agent}`);
     console.log(`broker  : ${config.brokerUrl}`);
-    console.log(`private : ${hasKey ? "✔ 已存在（" + (isMac ? "Keychain" : fileKeyPath(agent)) + "）" : "✖ 未建立"}`);
+    const where = fromEnv ? "環境變數 BROKER_PRIVATE_KEY" : isMac ? "Keychain" : fileKeyPath(agent);
+    console.log(`private : ${hasKey ? "✔ 已存在（" + where + "）" : "✖ 未建立"}`);
 }
 function cmdPubkey(config, flags) {
     const agent = resolveAgent(config, flags);
@@ -442,6 +452,7 @@ function usage() {
   broker rotate [--agent <id>]                                 換 keypair（之後要 register 新公鑰）
 
 環境變數:
+  BROKER_PRIVATE_KEY   agent 私鑰（base64 PKCS#8；CI／容器用，優先於 Keychain／檔案）
   BROKER_ADMIN_TOKEN   admin token（否則讀 Keychain service ${ADMIN_KEYCHAIN_SERVICE}）
   BROKER_AGENT_ID      預設 agent id
   BROKER_URL           覆蓋 broker 網址（等同 init 時 --broker-url）

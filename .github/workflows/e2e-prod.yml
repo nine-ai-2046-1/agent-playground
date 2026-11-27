@@ -1,0 +1,136 @@
+name: E2E prod broker
+
+# 目的：由一個乾淨出口（GitHub runner）打生產 worker，補「生產 E2E 做唔到」嘅缺口。
+# 需要嘅 repo secret（Settings → Secrets and variables → Actions）：
+#   BROKER_PRIVATE_KEY  agent 私鑰（base64 PKCS#8，單行）
+#   BROKER_AGENT_ID     CI agent id（預設 ci-e2e-01）
+#   BROKER_URL          broker 基底 URL（預設 https://github-token-broker.baobao2046.workers.dev）
+# 冇 secret 都跑得：只做可匿名驗嘅契約項（health／舊 endpoint 404／錯簽 401）。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "e2e-report.json"
+  schedule:
+    - cron: "0 1 * * *" # 每日 09:00 HKT
+
+permissions:
+  contents: write
+
+concurrency:
+  group: e2e-prod-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BROKER_URL: ${{ secrets.BROKER_URL || 'https://github-token-broker.baobao2046.workers.dev' }}
+  BROKER_AGENT_ID: ${{ secrets.BROKER_AGENT_ID || 'ci-e2e-01' }}
+  BROKER_PRIVATE_KEY: ${{ secrets.BROKER_PRIVATE_KEY }}
+  HAS_KEY: ${{ secrets.BROKER_PRIVATE_KEY != '' }}
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: 安裝依賴
+        run: npm ci --no-audit --no-fund
+
+      - name: 契約測試（mock KV，無網絡）
+        run: node worker/scripts/contract-test.mjs
+
+      - name: 建置 CLI
+        run: |
+          npm run build
+          npm i -g . --no-audit --no-fund
+          broker --version
+
+      - name: 退出碼契約（用法類錯一律 2）
+        run: |
+          set +e
+          broker >/dev/null 2>&1; c0=$?
+          broker init >/dev/null 2>&1; c1=$?
+          broker bogus-cmd >/dev/null 2>&1; c2=$?
+          set -e
+          echo "no-args=$c0 init=$c1 unknown=$c2"
+          test "$c0" = 2 && test "$c1" = 2 && test "$c2" = 2
+
+      - name: 生產 health
+        id: health
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -m 15 -o /tmp/health.json -w "%{http_code}" "$BROKER_URL/health")
+          echo "status=$code body=$(cat /tmp/health.json)"
+          test "$code" = 200
+          python3 -c "import json;d=json.load(open('/tmp/health.json'));assert d.get('ok') is True and d.get('ed25519') is True,d"
+
+      - name: 舊 /github-token 必須 404（未 opt-in）
+        run: |
+          code=$(curl -sS -m 15 -o /dev/null -w "%{http_code}" -X POST "$BROKER_URL/github-token")
+          echo "legacy=$code"
+          test "$code" = 404
+
+      - name: 錯簽必須 401
+        run: |
+          code=$(curl -sS -m 15 -o /dev/null -w "%{http_code}" -X POST "$BROKER_URL/v1/claim" \
+            -H 'content-type: application/json' \
+            -d '{"agent_id":"ci-e2e-01","wants":["github"],"ts":1,"nonce":"ci","sig":"AAAA"}')
+          echo "bad-sig=$code"
+          test "$code" = 401
+
+      - name: 真 claim（有 secret 才跑）
+        if: env.HAS_KEY == 'true'
+        run: |
+          set -euo pipefail
+          broker whoami
+          broker claim github --json > /tmp/claim.json
+          python3 - <<'PY'
+          import json, datetime, sys
+          d = json.load(open('/tmp/claim.json'))
+          tok = (d.get('secrets', {}).get('github') or {}).get('value') or ''
+          assert tok, d
+          assert tok.startswith('ghs_'), f"唔係 installation token 前綴: {tok[:4]}…"
+          assert len(tok) >= 300, f"token 太短: {len(tok)}"
+          exp = (d['secrets']['github'].get('expires_at') or '')
+          print(f"claim OK: prefix=ghs_ len={len(tok)} expires_at={exp}")
+          PY
+
+      - name: 寫報告
+        if: always()
+        run: |
+          node -e '
+          const fs=require("fs");
+          const ok = process.env.JOB_STATUS === "success";
+          const rep = {
+            at: new Date().toISOString(),
+            commit: process.env.GITHUB_SHA,
+            runner: process.env.RUNNER_NAME,
+            broker: process.env.BROKER_URL,
+            agent: process.env.BROKER_AGENT_ID,
+            hasKey: process.env.HAS_KEY === "true",
+            result: ok ? "success" : "failed",
+            runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
+          };
+          fs.writeFileSync("e2e-report.json", JSON.stringify(rep, null, 2) + "\n");
+          console.log(JSON.stringify(rep));
+          '
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: 提交報告（只 main，唔觸發下一輪）
+        if: always() && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "broker-ci"
+          git config user.email "ci@users.noreply.github.com"
+          git add e2e-report.json
+          git diff --cached --quiet && exit 0
+          git commit -m "ci: e2e report $(date -u +%FT%TZ) [skip ci]"
+          git push
