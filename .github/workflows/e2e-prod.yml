@@ -129,6 +129,9 @@ jobs:
           PY
           rm -f /tmp/claim.json
 
+      - name: 對抗性測試（紅隊：真打生產，任何一項攻擊成功即 fail）
+        run: node worker/scripts/attack-prod.mjs
+
       - name: 寫報告
         if: always()
         env:

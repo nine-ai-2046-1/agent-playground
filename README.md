@@ -23,6 +23,125 @@ grok     ─┘   (Worker 驗簽)         └─ 靜態 secret（SMTP app passwo
 
 私鑰永遠留在 agent 本機（macOS Keychain / 600 權限檔），**永不經網絡傳出**；broker 只存公鑰。
 
+
+## 用家視角：呢套嘢到底係咩（先睇呢節）
+
+**一句話**：`broker` 係一個「只認簽名嘅鎖匙箱」。你部機有一條私鑰（好似身份證，永遠唔會交出街），
+Cloudflare 只存你嘅公鑰（用嚟核對「真係你」）。你嚟攞 key，佢核對簽名就派，**唔會問你密碼、亦冇一張「萬能 token」**。
+
+### 三個角色，邊個可以做咩
+
+| 角色 | 係邊個 | 可以做 | 唔可以做 |
+| :-- | :-- | :-- | :-- |
+| **你**（Cloudflare 帳號持有人） | 只有你 | 加 agent、加／換 key、改授權、刪 agent | ——（你係唯一 root of trust） |
+| **每個 agent／每部機** | 你部電腦、CI runner、雲機 | 用自己私鑰 claim 自己被授權嘅 key | 改任何 registry／secret、刪任何嘢 |
+| **Worker** | Cloudflare 上面嘅程式 | 驗簽、派 key、寫 audit | 改資料（**冇 admin API，設計上做唔到**） |
+
+> 即係話：**就算有人拿到你嘅 CLI 原始碼、甚至拿到你嘅 agent 私鑰，佢最多只拿到「你自己已經授權嘅那幾個 key」**，
+> 唔會拿到其他人嘅、亦改唔到任何設定。唯一可以「全盤通吃」嘅係 Cloudflare 帳號本身。
+
+### 流程圖：由零到拿到 key
+
+```mermaid
+flowchart TD
+    A["你部機：裝 CLI<br/>broker --version"] --> B["broker init --agent my-agent<br/>（生成私鑰，留喺 Keychain／600 檔）"]
+    B --> C["broker ask-register --agent my-agent<br/>（印出一段 JSON：id + 公鑰 + 授權清單）"]
+    C --> D{"你（Cloudflare 帳號）<br/>貼去 KV agent:my-agent"}
+    D -->|貼好| E["agent 日常：broker claim github<br/>或 broker exec -- gh pr list"]
+    D -->|貼好| F["你要加其他 key？<br/>secret-envelope.mjs 加密 → KV sec:my-agent:name"]
+    F --> G["agent：broker exec --keys openai.api_key -- python app.py"]
+    E --> H["Worker 驗簽 → 查授權 → mint／解密 → 派"]
+    G --> H
+    H --> I["回應＋寫 audit（邊個、幾時、邊部機、IP hash）"]
+    D -->|要撤銷| J["Cloudflare 刪 agent:my-agent<br/>該 agent 即刻 401，其他人唔受影響"]
+```
+
+### 一次 claim 入面發生咩事（時間序）
+
+```mermaid
+sequenceDiagram
+    participant CLI as broker CLI（你部機）
+    participant W as Worker（Cloudflare）
+    participant KV as KV 儲存
+    participant GH as GitHub API
+    CLI->>CLI: 用私鑰簽 v1|agent|wants|ts|nonce
+    CLI->>W: POST /v1/claim（agent_id, wants, ts, nonce, sig）
+    W->>KV: 讀 agent:<id> 公鑰
+    W->>W: 驗簽（錯 → 401，唔會講「係你唔存在定簽名錯」）
+    W->>KV: nonce 未用過？（用過 → 409 重放）
+    W->>W: entitlements 有冇你想要嘅 key？（冇 → 403 整體拒絕）
+    alt 要 GitHub token
+        W->>GH: 用 App 私鑰 mint installation token（1 小時、按 repo 收窄）
+    else 要靜態 secret
+        W->>KV: 讀 sec:<agent>:<name> 密文，AES-256-GCM 解密
+    end
+    W->>KV: 更新 last_used_at／machine／ip
+    W-->>CLI: 只有你要求嘅 key（多個 key 一次過）
+```
+
+### 「我幾時要做咩」對照表
+
+| 你想做嘅事 | 你要做（人） | 用邊條指令／邊度 |
+| :-- | :-- | :-- |
+| **第一次裝** | 裝 CLI（release tarball + sha256 驗證） | `bash scripts-bootstrap-install.sh` |
+| **新機／新 agent 加入** | ① 部機 `init` ② 印 JSON ③ 你去 Cloudflare 貼 | `broker init` → `broker ask-register` → KV put |
+| **日常拿 GitHub token** | 乜都唔使做，直接跑 | `broker exec -- gh pr list`（或 `broker claim github`） |
+| **加一個新 key（OPENAI／Azure…）** | ① 本機加密 ② Cloudflare 寫 `sec:` ③ 改 `entitlements` | `secret-envelope.mjs` → `wrangler kv key put` |
+| **換 value（輪替同一條 key）** | 重新加密覆寫同一個 `sec:` key | agent 唔需要改任何嘢，下次 claim 就係新值 |
+| **懷疑私鑰洩漏** | `rotate` 生成新 key → 去 Cloudflare 換公鑰 | `broker rotate` → `ask-register` |
+| **某部機／某 agent 唔再用** | 去 Cloudflare 刪 `agent:<id>` | KV delete（CLI 冇呢個功能） |
+| **查邊個用過、邊個試圖入侵** | 查 D1 audit 表 | `wrangler d1 execute …`（見「審計」節） |
+| **本機完全連唔到 workers.dev** | 唔關 broker 事（係 SNI 封鎖）；改用 CI runner 驗 | 見「網絡限制」節 |
+
+### `claim` 同 `exec` 到底咩關係（最多人誤解嘅位）
+
+| 問題 | 答案 |
+| :-- | :-- |
+| claim 完一次，之後同機 `exec` 係唔係直接識用個 token？ | **唔係。冇任何 cache。** `exec` 每次都係「即刻做一次全新 claim」：新 nonce、新時間戳、**新 mint 嘅 GitHub token** |
+| 咁 token 會唔會留喺部機？ | 唔會落磁碟。只存在**子進程嘅環境變數**，子進程一完就消失 |
+| 咁我跑 100 次 `exec` 會唔會 mint 100 次 token？ | 會。所以**一個 script 應該用一次 `exec` 包住**：`broker exec -- bash run-all.sh`，唔好逐條命令 `exec` |
+| 可唔可以自己 export 之後用？ | 可以（`broker claim github --env` 印 `export GH_TOKEN=…`），但 token 會留喺 shell／history／環境，安全性差過 `exec`。只建議一次性 debug |
+| 可以一次拿幾個 key？ | 可以：`broker claim a b c` 或 `broker exec --keys a,b,c -- cmd`；上限 12 個 |
+| 拿唔到其中一個會點？ | 若任何一個唔在 `entitlements` → **整體 403，一個都唔派**（唔會派一半） |
+
+### 非 GitHub 嘅 key（OPENAI、Azure、自訂 endpoint）得唔得？
+
+**得，而且係同一個機制。** 任何字串都可以做 secret：API key、endpoint URL、model 名、甚至一段 JSON。
+
+規則只有一條：**secret 嘅「名」會變成環境變數名**（大寫、非英數變 `_`）。
+
+| 你喺 broker 用嘅名 | `exec` 後嘅環境變數 |
+| :-- | :-- |
+| `github` | `GH_TOKEN` 同 `GITHUB_TOKEN`（特例，一次給兩個） |
+| `openai.api_key` | `OPENAI_API_KEY` |
+| `azure.openai.api_key` | `AZURE_OPENAI_API_KEY` |
+| `azure.openai.endpoint` | `AZURE_OPENAI_ENDPOINT` |
+| `azure.openai.deployment` | `AZURE_OPENAI_DEPLOYMENT` |
+
+**完整例子（用 OpenAI，唔想 key 落 `.env`／`~/.zshrc`）**
+
+```bash
+# ── 你（管理員）一次性 ────────────────────────────────
+# 1) 本機加密（明文只喺你部機出現過，輸出係密文信封）
+printf '%s' 'sk-proj-xxxx' | node scripts/secret-envelope.mjs --agent my-agent --name openai.api_key
+# 2) 跟住照佢印出嘅指令寫入 Cloudflare KV：sec:my-agent:openai.api_key
+# 3) 喺 agent:my-agent 嘅 JSON entitlements 加 "openai.api_key"
+#    （同一個 JSON 可加 azure.openai.endpoint 等）
+
+# ── agent 日常 ────────────────────────────────────────
+broker exec --keys openai.api_key,azure.openai.endpoint -- python app.py
+```
+
+```python
+# app.py —— 完全唔需要知道 key 喺邊
+import os
+key = os.environ["OPENAI_API_KEY"]
+base = os.environ.get("AZURE_OPENAI_ENDPOINT")  # 有就自動有
+```
+
+> **要唔要連 endpoint 都放入 broker？** endpoint／model 名唔算秘密，寫死喺 code 最簡單。
+> 放 broker 嘅好處係「一部機一份設定」，壞處係每次 claim 多一個 key、多一次解密。**建議：真秘密入 broker，非秘密寫喺 code。**
+
 ## 目錄
 
 | 路徑 | 內容 |
@@ -72,28 +191,20 @@ broker whoami
 > 唔建議 `npm i -g github:nine-ai-2046-1/agent-playground`：會跟隨 `main` HEAD（供應鏈風險），
 > 而且喺已有安裝上重裝會撞 npm `ENOTEMPTY`。要用就用 `--from-git` 加 `REF=<tag 或 commit sha>`。
 
-## 快速開始
+## 快速開始（3 步）
 
 ```bash
-# 1. 建立 agent 身份（生成 Ed25519 keypair；macOS 入 Keychain，Linux 寫 ~/.config/secret-broker/keys/*.pkcs8 600）
-broker init --agent opencode-01
+# 1. 部機生成身份（私鑰留本機：macOS Keychain／Linux 600 檔）
+broker init --agent my-agent
 
-# 2. 登記（喺 Cloudflare 帳號層做；CLI 只負責印出要寫入嘅 JSON）
-broker ask-register --agent opencode-01 \
-  --entitlements github \
-  --installation-id 185701417 \
-  --repositories agent-playground
-# → 跟住喺 Cloudflare KV 寫入 agent:opencode-01（指令會印埋出嚟）
+# 2. 印出要登記嘅 JSON（貼去 Cloudflare KV；CLI 唔會自己寫）
+broker ask-register --agent my-agent --entitlements github --installation-id 185701417
 
-# 3. 加靜態 secret（本機加密，只出密文）
-printf '%s' 'p@ssword' | node scripts/secret-envelope.mjs --agent opencode-01 --name smtp.password
-
-# 4. 用
-broker claim github            # 遮罩摘要（sha256 前 8 位 + 長度 + 到期）
-broker claim github --print    # 原文 JSON
-broker exec -- gh pr list      # 自動注入 GH_TOKEN 再跑命令
-broker exec --keys smtp.password -- sh -c 'echo ${#SMTP_PASSWORD}'
+# 3. 日常用（每次自動全新 claim，唔會 cache）
+broker exec -- gh pr list
 ```
+
+> 完整「邊個角色做咩、幾時做」見上面〈用家視角〉同〈流程圖〉。
 
 ## 指令
 

@@ -349,11 +349,43 @@ function cmdRotate(config, flags) {
     const agent = resolveAgent(config, flags);
     const { pkcs8, rawPublic } = generateKeypair();
     const where = savePrivateKey(agent, pkcs8);
-    console.log(`✔ agent「${agent}」已換新 keypair（舊公鑰仍然有效直到 register 覆寫）`);
+    console.log(`✔ agent「${agent}」已換新 keypair`);
+    console.log(`  注意：舊公鑰由呢刻起失效，未更新 Cloudflare 之前 claim 會一直 401`);
     console.log(`  新私鑰：${where}`);
     console.log(`  新公鑰：${rawPublic}`);
-    console.log(`\n立即生效：`);
-    console.log(`  broker register --agent ${agent} --pubkey ${rawPublic} --entitlements <維持原清單>`);
+    console.log(`\n下一步（人手喺 Cloudflare 改 agent:${agent} 嘅 pubkey）：`);
+    console.log(`  broker ask-register --agent ${agent}      # 印出完整 JSON，貼落 KV`);
+}
+/** 印出要人手寫入 Cloudflare KV 嘅 agent record（CLI 本身唔寫、唔上網） */
+function cmdAskRegister(config, flags) {
+    const agent = resolveAgent(config, flags);
+    const pubkey = flagString(flags, "pubkey") || derivePublicKey(agent);
+    const entFlag = flagString(flags, "entitlements");
+    const entitlements = entFlag
+        ? entFlag.split(",").map((v) => v.trim()).filter(Boolean)
+        : ["github"];
+    const record = {
+        id: agent,
+        pubkey,
+        status: "active",
+        entitlements,
+        created_at: new Date().toISOString(),
+    };
+    const installation = flagString(flags, "installation-id");
+    if (installation) {
+        const repos = flagString(flags, "repositories");
+        record.github = {
+            installation_id: Number(installation),
+            ...(repos ? { repositories: repos.split(",").map((v) => v.trim()).filter(Boolean) } : {}),
+        };
+    }
+    const body = JSON.stringify(record);
+    console.log(body);
+    console.log("");
+    console.log("# 寫入提示（Cloudflare 帳號層；KV 已有同名 key 就係覆寫）");
+    console.log(`cd worker && npx wrangler kv key put --binding=BROKER_KV --remote "agent:${agent}" '${body}'`);
+    console.log("");
+    console.log("# 只有 Cloudflare 帳號持有人做得到，所以 CLI 本身冇寫入能力");
 }
 function usage() {
     console.log(`broker — per-agent Secret Broker CLI (v${readCliVersion()})
@@ -362,7 +394,7 @@ function usage() {
   broker init --agent <id> [--broker-url <url>] [--force]      建立 agent 身份（Ed25519；macOS→Keychain，Linux→600 檔）
   broker ask-register [--agent <id>]                          印出「要喺 Cloudflare 寫入嘅 agent JSON」
   broker whoami [--agent <id>]                                 顯示本機身份
-  broker pubkey [--agent <id>]                                 由私鑰推導公鑰（register 用，唔需要抄）
+  broker pubkey [--agent <id>]                                 由私鑰推導公鑰（貼上 Cloudflare 用）
   broker health                                                檢查 broker
 
   broker claim [key...] [--print|--env|--json] [--agent <id>]   取 secret（預設遮罩摘要）
@@ -412,6 +444,9 @@ async function main() {
             return;
         case "pubkey":
             cmdPubkey(config, flags);
+            return;
+        case "ask-register":
+            cmdAskRegister(config, flags);
             return;
         case "health":
             await cmdHealth(config);
