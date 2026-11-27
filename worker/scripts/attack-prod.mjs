@@ -271,6 +271,15 @@ if (key) {
 
 /* ---------- 7. 限流（放在最後，會燒盡本 agent 配額） ---------- */
 if (key) {
+  // 限流係「每分鐘固定窗」：45 連發橫跨分鐘邊界就會 30 + 35 兩窗都唔爆，
+  // 咁樣失敗係測試設計錯，唔係產品問題。所以先對齊窗起點（秒數 < 8 才開始），
+  // 確保 45 發（大約 45 秒）全部落入同一個窗。
+  const sec = new Date().getSeconds();
+  if (sec > 8) {
+    const waitMs = (61 - sec) * 1000;
+    console.log(`  （等 ${Math.round(waitMs / 1000)}s 對齊限流窗口起點）`);
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
   const hits = [];
   for (let i = 0; i < 45; i += 1) {
     const ts = now();
@@ -280,7 +289,7 @@ if (key) {
     if (r.status === 429) break;
   }
   const first429 = hits.find((h) => h.status === 429);
-  check("突發請求觸發 429", Boolean(first429), first429 ? `Retry-After=${first429.ra}` : "45 次都冇 429");
+  check("突發請求觸發 429", Boolean(first429), first429 ? `Retry-After=${first429.ra}（第 ${hits.indexOf(first429) + 1} 發）` : "45 次都冇 429（同一窗未過限額？檢查 test 是否跨窗）");
   check("429 有數字 Retry-After", Boolean(first429 && Number(first429.ra) > 0), first429 ? String(first429.ra) : "無");
   const bad = hits.filter((h) => h.status >= 500);
   const dist = hits.map((h) => h.status).join(",");
