@@ -6,13 +6,12 @@ name: E2E prod broker
 #   BROKER_AGENT_ID     CI agent id（預設 ci-e2e-01）
 #   BROKER_URL          broker 基底 URL（預設 https://github-token-broker.baobao2046.workers.dev）
 # 冇 secret 都跑得：只做可匿名驗嘅契約項（health／舊 endpoint 404／錯簽 401）。
+# 安全：任何 secret 值／token 都唔會寫入 log 或 e2e-report.json；只寫 prefix、長度、expires_at。
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths-ignore:
-      - "e2e-report.json"
   schedule:
     - cron: "0 1 * * *" # 每日 09:00 HKT
 
@@ -90,23 +89,24 @@ jobs:
         run: |
           set +e
           broker whoami > /tmp/claim.diag 2>&1
-          echo "----- claim -----" >> /tmp/claim.diag
           broker claim github --json > /tmp/claim.json 2>> /tmp/claim.diag
           rc=$?
           echo "rc=$rc" >> /tmp/claim.diag
-          echo "--- claim json 頭 600 字 ---" >> /tmp/claim.diag
-          head -c 600 /tmp/claim.json >> /tmp/claim.diag 2>/dev/null
-          sed -E 's/(ghs_[A-Za-z0-9]{6})[A-Za-z0-9]+/\1.../g' /tmp/claim.diag
           set -e
+          cat /tmp/claim.diag
           test "$rc" = 0
           python3 - <<'PY'
           import json
           d = json.load(open('/tmp/claim.json'))
-          tok = (d.get('secrets', {}).get('github') or {}).get('value') or ''
-          assert tok, d
-          assert len(tok) >= 80, f"token too short: {len(tok)}"
-          print(f"claim OK: prefix={tok[:4]} len={len(tok)}")
+          sec = (d.get('secrets') or {}).get('github') or {}
+          tok = sec.get('token') or sec.get('value') or ''
+          assert tok, 'no token in response'
+          assert len(tok) >= 80, f'token too short: {len(tok)}'
+          summary = {'prefix': tok[:4], 'len': len(tok), 'expires_at': sec.get('expires_at'), 'permissions': sec.get('permissions')}
+          print('claim OK: ' + json.dumps(summary, ensure_ascii=False))
+          open('/tmp/claim.summary', 'w').write(json.dumps(summary, ensure_ascii=False))
           PY
+          rm -f /tmp/claim.json
 
       - name: 寫報告
         if: always()
@@ -115,10 +115,14 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, pathlib, datetime
+          claim = None
+          s = pathlib.Path('/tmp/claim.summary')
+          if s.exists():
+              claim = json.loads(s.read_text())
           diag = None
           f = pathlib.Path('/tmp/claim.diag')
-          if f.exists():
-              diag = f.read_text(errors='replace')[-1200:]
+          if f.exists() and os.environ.get('JOB_STATUS') != 'success':
+              diag = f.read_text(errors='replace')[-600:]
           rep = {
               'at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
               'commit': os.environ.get('GITHUB_SHA'),
@@ -128,6 +132,7 @@ jobs:
               'hasKey': os.environ.get('HAS_KEY') == 'true',
               'result': 'success' if os.environ.get('JOB_STATUS') == 'success' else 'failed',
               'runUrl': os.environ.get('GITHUB_SERVER_URL') + '/' + os.environ.get('GITHUB_REPOSITORY') + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID'),
+              'claim': claim,
               'diag': diag,
           }
           pathlib.Path('e2e-report.json').write_text(json.dumps(rep, ensure_ascii=False, indent=2) + "\n")
