@@ -526,7 +526,7 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 | `agents/TECH.md` | 接手的 developer agent | 架構、API 契約、KV 模型、部署／發版／測試 playbook、已知陷阱 |
 | `agents/AUDIT.md` | audit agent | 宣稱清單、控制清單、風險登記冊（P0–P2）、audit playbook、測試案例、證據要求 |
 
-審核基線（2026-11-27 N7 後）：Worker 只暴露 `/health` + `/v1/claim`，admin API 全撤；契約測試 22/22；D1 `broker-audit` 有 `machine_id` 欄；Access 未開。
+審核基線（2026-11-27 N7 後）：Worker 只暴露 `/health` + `/v1/claim`，admin API 全撤；契約測試 30/30（紅隊 24/24）；D1 `broker-audit` 有 `machine_id` 欄；Access 未開。
 
 ## 授權（License）
 
