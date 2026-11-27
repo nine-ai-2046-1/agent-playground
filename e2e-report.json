@@ -1,29 +1,29 @@
 {
-  "at": "2026-11-27T15:46:34Z",
-  "commit": "28b8b15a5ba3081ca9833fc18b7bba376528d3d7",
-  "runner": "GitHub Actions 1000000178",
+  "at": "2026-11-27T15:51:32Z",
+  "commit": "6a8dafb52cc3b3b4df45504237abc223fad44d5c",
+  "runner": "GitHub Actions 1000000179",
   "broker": "https://github-token-broker.baobao2046.workers.dev",
   "agent": "ci-e2e-01",
   "hasKey": true,
-  "result": "failed",
-  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/46027689323",
+  "result": "success",
+  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/46028444125",
   "claim": {
     "prefix": "ghs_",
     "len": 390,
-    "expires_at": "2026-11-27T16:45:46Z",
+    "expires_at": "2026-11-27T16:50:45Z",
     "permissions": {
-      "pages": "write",
-      "issues": "write",
       "actions": "write",
       "contents": "write",
+      "discussions": "write",
+      "issues": "write",
       "metadata": "read",
       "packages": "write",
-      "statuses": "write",
-      "workflows": "write",
-      "discussions": "write",
+      "pages": "write",
       "pull_requests": "write",
-      "repository_creation": "write"
+      "repository_creation": "write",
+      "statuses": "write",
+      "workflows": "write"
     }
   },
-  "diag": "agent   : ci-e2e-01\nbroker  : https://github-token-broker.baobao2046.workers.dev\nprivate : ✔ 已存在（環境變數 BROKER_PRIVATE_KEY）\nrc=0\n"
+  "diag": null
 }
