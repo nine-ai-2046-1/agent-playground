@@ -281,7 +281,7 @@ audit/<YYYY-MM-DD>/
 | N2 | Admin token 單點、無 rotation／rate limit | 屬設計改動（S10 級） | 建議下一步：admin 也走 Ed25519 + 雙 token 輪替 |
 | N3 | 靜態 secret 原文存 KV | ✅ **已修（2026-11-27）**：AES-256-GCM 信封加密（AAD 綁 agent+name），KV 只存 `{v,alg,iv,ct}`；未設 key 寫入 503（fail closed）；舊明文可讀 + `POST /v1/admin/reencrypt` 遷移；契約測試 20/20 | 生產 `BROKER_MASTER_KEY` 已上（worker `540987ca`） |
 | N4 | audit log 只 console.log | 需 D1／R2 或 Logpush | Roadmap 第 6 項 |
-| N5 | CLI 安裝仍可跟 HEAD | 需 release tarball＋checksum 或 pin 政策 | README 已寫 pin 建議，未機械強制 |
+| N5 | CLI 安裝仍可跟 HEAD | ✅ **已修（2026-11-27）**：`scripts-bootstrap-install.sh` 預設走 release `v0.4.0` tarball，下載 `.sha256` 驗證後才 `npm i -g`，並核對 `broker --version` 同 tag 一致；`--from-git` 只在應急用；CI 每次跑都實測 release 安裝路徑 | 實測：private repo 嘅 `releases/download` URL 回 404，已改 API asset URL |
 | N6 | 本機殘留 `.dev.vars`／`~/Downloads/*.pem` | ✅ **已完成（2026-11-27）**：App PEM（原 644）已搬去 `~/Doubao/secrets/baobao2046.app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；`.dev.vars` 600 只留本機 dev 用 | master key 亦存 `~/Doubao/secrets/broker-master-key.b64`（600） |
 
 ### 此批次的新基線

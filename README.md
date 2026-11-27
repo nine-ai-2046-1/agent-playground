@@ -37,32 +37,40 @@ grok     ─┘   (Worker 驗簽)         └─ 靜態 secret（SMTP app passwo
 
 ## 安裝
 
-**推薦：由 clone 或用腳本裝**（private repo 需要讀取權限；token 只走 `GIT_ASKPASS`，唔入 shell history）
+**推薦：由 release tarball 裝（pin 版本 + sha256 驗證）**
 
 ```bash
-# A. 一鍵（需要 fine-grained PAT：只勾 Contents:Read、只限本 repo）
+# A. 一鍵（推薦；private repo 需要只讀 token：fine-grained PAT 只勾 Contents:Read，或 GitHub App installation token）
 read -rsp 'GitHub read token: ' GH_TOKEN && echo
-GH_TOKEN="$GH_TOKEN" bash scripts-bootstrap-install.sh
+GH_TOKEN="$GH_TOKEN" bash scripts-bootstrap-install.sh            # 預設 pin v0.4.0
+
+# 想 pin 其他已發佈版本：
+GH_TOKEN="$GH_TOKEN" REL_TAG=v0.4.0 bash scripts-bootstrap-install.sh
 
 # B. 已經手動 clone 落機（完全離線，唔需要 token）
-git clone https://github.com/nine-ai-2046-1/agent-playground.git ~/src/agent-playground
 bash ~/src/agent-playground/scripts-bootstrap-install.sh --dir ~/src/agent-playground
 
-# C. Air-gap：pack 做 tarball 再搬去目標機
-cd agent-playground && npm pack
-npm i -g ./nine-ai-secret-broker-cli-*.tgz
+# C. 應急：直接由 repo ref 裝（唔 pin、無 checksum，只限網絡故障時）
+GH_TOKEN="$GH_TOKEN" REF=main bash scripts-bootstrap-install.sh --from-git
 ```
+
+安裝流程（A 模式）：
+
+1. `GET /repos/…/releases/tags/<REL_TAG>` 取 asset id（private repo 用 API asset URL；`github.com/…/releases/download/…` 會 404）
+2. 下載 `nine-ai-secret-broker-cli-<ver>.tgz` 同同名 `.sha256`
+3. `sha256sum -c` 驗證，唔符即中止（**唔會**裝落去）
+4. `npm i -g` tarball，最後核對 `broker --version` 同 release tag 一致
 
 驗證：
 
 ```bash
-broker --version     # 例：broker 0.3.0
+broker --version     # 例：broker 0.4.0
 broker help
 broker whoami
 ```
 
 > 唔建議 `npm i -g github:nine-ai-2046-1/agent-playground`：會跟隨 `main` HEAD（供應鏈風險），
-> 而且喺已有安裝上重裝會撞 npm `ENOTEMPTY`。要用就用 `git+https://…#<commit sha>` pin 死版本。
+> 而且喺已有安裝上重裝會撞 npm `ENOTEMPTY`。要用就用 `--from-git` 加 `REF=<tag 或 commit sha>`。
 
 ## 快速開始
 

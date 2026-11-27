@@ -242,16 +242,27 @@ BROKER_URL=http://127.0.0.1:8787 broker claim ghost.key  --agent <id> ; echo $? 
 ## 11. 發版 playbook
 
 ```bash
-# 1) bump 版本（0.3.x → 0.4.0 等，功能變更就升 minor）
+# 1) bump 版本（package.json；功能變更升 minor）
 # 2) build 並 commit dist（安裝靠 dist，唔會 build）
 npm run build && node dist/index.js --version
 # 3) 更新 README / agents 文件內任何受影響的事實
-# 4) commit + push（用 installation token 或 fine-grained PAT）
-# 5) 全域更新：
-npm pack --silent && npm i -g --force ./<tarball>.tgz
+# 4) commit + push
+# 5) 打 tag 並發 release（N5：安裝靠這個）
+SHA=$(git rev-parse HEAD)
+#   POST /git/refs            {"ref":"refs/tags/v<ver>","sha":"$SHA"}
+#   POST /releases            {"tag_name":"v<ver>", ...}
+#   POST uploads.github.com/repos/<slug>/releases/<relId>/assets?name=<file>
+# 6) 產生 checksum 檔一併上載：
+npm pack --silent
+shasum -a 256 nine-ai-secret-broker-cli-<ver>.tgz | awk '{print $1"  "$2}' > nine-ai-secret-broker-cli-<ver>.tgz.sha256
+# 7) 驗證安裝路徑（本機）：
+GH_TOKEN=<只讀 token> REL_TAG=v<ver> bash scripts-bootstrap-install.sh
 ```
 
-**唔好用** `npm i -g github:...` 做發版安裝（見陷阱 12.1）。
+**注意**：private repo 嘅 `https://github.com/<slug>/releases/download/<tag>/<file>` 會回 **404**（實測），
+所以腳本一律用 `GET /releases/assets/<id>` + `Accept: application/octet-stream` 下載。
+
+**唔好用** `npm i -g github:...` 做發版安裝（見陷阱 12.1）；亦唔好用 `main` HEAD 做安裝來源。
 
 ## 12. 已知陷阱（真實踩過）
 
