@@ -57,6 +57,25 @@ function flagString(flags: Record<string, string | true>, name: string): string 
   return typeof value === "string" ? value : undefined;
 }
 
+/** 讀取 CLI 自身版本：由執行檔位置往上找 package.json（dist/ 或 src/ 都成立） */
+function readCliVersion(): string {
+  try {
+    const here = path.dirname(fs.realpathSync(process.argv[1] ?? __filename));
+    for (const candidate of [
+      path.join(here, "..", "package.json"),
+      path.join(here, "package.json"),
+      path.join(here, "..", "..", "package.json"),
+    ]) {
+      if (!fs.existsSync(candidate)) continue;
+      const parsed = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      if (typeof parsed.version === "string") return parsed.version;
+    }
+  } catch (_) {
+    /* ignore */
+  }
+  return "unknown";
+}
+
 // ------------------------------------------------------------------- config
 
 interface Config {
@@ -65,15 +84,18 @@ interface Config {
 }
 
 function readConfig(): Config {
+  let brokerUrl = DEFAULT_BROKER_URL;
+  let agentId: string | undefined;
   try {
     const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
-    return {
-      brokerUrl: String(raw.brokerUrl || DEFAULT_BROKER_URL).replace(/\/+$/, ""),
-      agentId: raw.agentId ? String(raw.agentId) : undefined,
-    };
+    brokerUrl = String(raw.brokerUrl || DEFAULT_BROKER_URL);
+    agentId = raw.agentId ? String(raw.agentId) : undefined;
   } catch {
-    return { brokerUrl: DEFAULT_BROKER_URL };
+    /* 未初始化：用預設 */
   }
+  // 環境變數優先，方便 CI／staging／本機 dev 唔改 config 就切 broker
+  if (process.env.BROKER_URL) brokerUrl = process.env.BROKER_URL;
+  return { brokerUrl: brokerUrl.replace(/\/+$/, ""), agentId };
 }
 
 function writeConfig(config: Config) {
@@ -82,7 +104,7 @@ function writeConfig(config: Config) {
 }
 
 function resolveAgent(config: Config, flags: Record<string, string | true>): string {
-  const agent = flagString(flags, "agent") || config.agentId || process.env.BROKER_AGENT_ID;
+  const agent = flagString(flags, "agent") || process.env.BROKER_AGENT_ID || config.agentId;
   if (!agent) die("未指定 agent；先跑 `broker init --agent <id>` 或用 --agent 指定");
   return agent;
 }
@@ -390,7 +412,9 @@ async function doClaim(config: Config, agent: string, wants: string[]): Promise<
   const sig = signPayload(agent, wants, ts, nonce);
   const res = await callBroker<ClaimResponse>(config, "POST", "/v1/claim", { agent_id: agent, wants, ts, nonce, sig });
   if (res.status !== 200 && res.status !== 207) {
-    die(`claim 失敗：HTTP ${res.status} ${JSON.stringify(res.json)}`);
+    // 讓 agent 可以按退出碼分流：3 未授權 / 4 無權限 / 5 找不到 / 6 重放
+    const code = ({ 401: 3, 403: 4, 404: 5, 409: 6 } as Record<number, number>)[res.status] ?? 1;
+    die(`claim 失敗：HTTP ${res.status} ${JSON.stringify(res.json)}`, code);
   }
   return res.json as ClaimResponse;
 }
@@ -466,7 +490,7 @@ async function cmdAdminLogin(flags: Record<string, string | true>) {
 }
 
 function usage() {
-  console.log(`broker — per-agent Secret Broker CLI
+  console.log(`broker — per-agent Secret Broker CLI (v${readCliVersion()})
 
 用法:
   broker init --agent <id> [--broker-url <url>] [--force]      建立 agent 身份（Ed25519，私鑰入 Keychain）
@@ -486,10 +510,24 @@ function usage() {
 環境變數:
   BROKER_ADMIN_TOKEN   admin token（否則讀 Keychain service ${ADMIN_KEYCHAIN_SERVICE}）
   BROKER_AGENT_ID      預設 agent id
+  BROKER_URL           覆蓋 broker 網址（等同 init 時 --broker-url）
 
 慣例:
   github  → GH_TOKEN / GITHUB_TOKEN
   其他     → 大寫、非英數轉底線（smtp.password → SMTP_PASSWORD）
+
+其他:
+  broker version | --version | -v    印出版本
+  broker help | --help | -h          印出本說明
+
+文件:
+  agents/START.md   給要用 broker 的 agent（安裝後點用、DO & DONT）
+  agents/TECH.md    給接手開發的 agent（架構、契約、playbook）
+  agents/AUDIT.md   給 audit agent（宣稱、風險、待辦、audit scope 設計）
+
+退出碼:
+  0 成功 ／ 1 執行錯誤 ／ 2 用法錯誤
+  claim 專用：3 未授權(401) ／ 4 無 entitlement(403) ／ 5 secret 不存在(404) ／ 6 偵測重放(409)
 `);
 }
 
@@ -534,6 +572,11 @@ async function main() {
       return;
     case "rotate":
       cmdRotate(config, flags);
+      return;
+    case "version":
+    case "--version":
+    case "-v":
+      console.log(`broker ${readCliVersion()}`);
       return;
     case "help":
     case "--help":

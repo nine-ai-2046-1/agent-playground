@@ -27,18 +27,41 @@ grok     ─┘   (Worker 驗簽)         └─ 靜態 secret（SMTP app passwo
 
 | 路徑 | 內容 |
 | :-- | :-- |
-| `src/index.ts` → `dist/index.js` | `broker` CLI（TypeScript，全域指令） |
+| `src/index.ts` → `dist/index.js` | `broker` CLI（TypeScript，全域指令）；`dist` 已 commit，安裝時唔需要 build |
 | `worker/` | Cloudflare Worker（驗簽 + 派 secret） |
 | `worker/scripts/s5-proof.sh` | 舊 bearer flow 的 token 過期驗證腳本（S5 用） |
+| `scripts-bootstrap-install.sh` | agent 機安裝腳本（clone → `npm pack` → 全域裝） |
+| `agents/START.md` | 給要用 broker 的 agent（安裝後點用、DO & DONT） |
+| `agents/TECH.md` | 給接手開發的 agent（架構、API 契約、部署／發版 playbook） |
+| `agents/AUDIT.md` | 給 audit agent（宣稱清單、風險登記冊、audit playbook） |
 
-## 安裝（channel A：由 repo 直接裝）
+## 安裝
+
+**推薦：由 clone 或用腳本裝**（private repo 需要讀取權限；token 只走 `GIT_ASKPASS`，唔入 shell history）
 
 ```bash
-npm i -g github:nine-ai-2046-1/agent-playground
-broker --help
+# A. 一鍵（需要 fine-grained PAT：只勾 Contents:Read、只限本 repo）
+GH_TOKEN='<token>' bash scripts-bootstrap-install.sh
+
+# B. 已經手動 clone 落機（完全離線，唔需要 token）
+git clone https://github.com/nine-ai-2046-1/agent-playground.git ~/src/agent-playground
+bash ~/src/agent-playground/scripts-bootstrap-install.sh --dir ~/src/agent-playground
+
+# C. Air-gap：pack 做 tarball 再搬去目標機
+cd agent-playground && npm pack
+npm i -g ./nine-ai-secret-broker-cli-*.tgz
 ```
 
-Private repo 要先有權限：用 broker 自己派嘅 installation token，或者 GitHub 已登入嘅 git credential。
+驗證：
+
+```bash
+broker --version     # 例：broker 0.3.0
+broker help
+broker whoami
+```
+
+> 唔建議 `npm i -g github:nine-ai-2046-1/agent-playground`：會跟隨 `main` HEAD（供應鏈風險），
+> 而且喺已有安裝上重裝會撞 npm `ENOTEMPTY`。要用就用 `git+https://…#<commit sha>` pin 死版本。
 
 ## 快速開始
 
@@ -46,18 +69,21 @@ Private repo 要先有權限：用 broker 自己派嘅 installation token，或�
 # 1. 建立 agent 身份（生成 Ed25519 keypair，私鑰入 Keychain）
 broker init --agent opencode-01
 
-# 2. 拿公鑰去登記（admin 權限）
+# 2. 登記（admin 權限；公鑰自動由本機私鑰推導，唔需要抄）
 broker admin-login --token-stdin              # 由 stdin 讀 admin token
 broker register --agent opencode-01 \
-  --pubkey <init 印出嘅公鑰> \
   --entitlements github \
   --installation-id 185701417 \
   --repositories agent-playground
 
-# 3. 用
+# 3. 加靜態 secret（--grant 會自動加 entitlement）
+printf '%s' 'p@ssword' | broker secret-put --agent opencode-01 --name smtp.password --grant
+
+# 4. 用
 broker claim github            # 遮罩摘要（sha256 前 8 位 + 長度 + 到期）
 broker claim github --print    # 原文 JSON
 broker exec -- gh pr list      # 自動注入 GH_TOKEN 再跑命令
+broker exec --keys smtp.password -- sh -c 'echo ${#SMTP_PASSWORD}'
 ```
 
 ## 指令
@@ -67,13 +93,21 @@ broker exec -- gh pr list      # 自動注入 GH_TOKEN 再跑命令
 | `broker init --agent <id>` | 生成 keypair、寫 config、印公鑰 |
 | `broker whoami` | 顯示本機 agent / broker / 有冇私鑰 |
 | `broker health` | 檢查 broker 可達性（`/health`） |
+| `broker pubkey` | 由私鑰推導公鑰（register 用，唔需要抄） |
 | `broker claim [key…] [--print\|--env\|--json]` | 簽名 claim；預設遮罩 |
-| `broker exec [--keys a,b] -- <cmd…>` | claim 後注入環境變數執行 |
+| `broker exec [--keys a,b] -- <cmd…>` | claim 後注入環境變數執行（推薦） |
 | `broker rotate` | 換 keypair（register 新公鑰後生效） |
 | `broker register / agents / secret-put` | admin：登記公鑰、列 registry、存靜態 secret |
 | `broker admin-login --token-stdin` | admin token 入 Keychain |
+| `broker version \| --version \| -v` | 印版本 |
+| `broker help \| --help \| -h` | 印說明（含文件索引、退出碼） |
 
-環境變數慣例：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其他 key 大寫、非英數轉底線（`smtp.password` → `SMTP_PASSWORD`）。
+環境變數：`BROKER_URL`（覆蓋 broker 網址）、`BROKER_AGENT_ID`（預設 agent）、`BROKER_ADMIN_TOKEN`（admin）。
+環境變數優先於 `~/.config/secret-broker/config.json`。
+
+CLI 退出碼：`0` 成功、`1` 執行錯誤、`2` 用法錯誤；claim 專用 `3` 401、`4` 403、`5` 404、`6` 409。
+
+secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其他 key 大寫、非英數轉底線（`smtp.password` → `SMTP_PASSWORD`）。
 
 ## API
 
@@ -143,3 +177,13 @@ broker exec -- gh pr list      # 自動注入 GH_TOKEN 再跑命令
 - claim token 短期快取，減少 GitHub API 呼叫
 - Access / Service Token 作為第二層（要卡）
 - `broker run --env-file` 一次過注入多個 secret
+
+## 角色文件（給 agent 讀）
+
+| 文件 | 對象 | 內容 |
+| :-- | :-- | :-- |
+| `agents/START.md` | 要用 broker 的 agent | 前提檢查、常用指令、env 對應、退出碼、DO & DONT |
+| `agents/TECH.md` | 接手的 developer agent | 架構、API 契約、KV 模型、部署／發版／測試 playbook、已知陷阱 |
+| `agents/AUDIT.md` | audit agent | 宣稱清單、控制清單、風險登記冊（P0–P2）、audit playbook、測試案例、證據要求 |
+
+審核基線（2026-11-27）：Worker 版本 `2b104aaf`、CLI `0.3.0`、生產 registry 只有 `opencode-01`、Access 未開。
