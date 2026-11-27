@@ -389,6 +389,13 @@ export default {
         return finish(json({ agents }, 200));
       }
 
+      // GET /v1/agents/:id  （admin：連 pubkey 全值，做輪替／加 entitlement 用）
+      if (parts[1] === "agents" && parts.length === 3 && request.method === "GET") {
+        const rec = await getAgent(env, parts[2]);
+        if (!rec) return finish(json({ error: "not_found" }, 404));
+        return finish(json({ agent: rec }, 200));
+      }
+
       // PUT /v1/agents/:id   （註冊／輪替公鑰）
       if (parts[1] === "agents" && parts.length === 3 && request.method === "PUT") {
         const id = parts[2];

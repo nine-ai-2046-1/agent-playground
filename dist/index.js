@@ -130,6 +130,13 @@ function generateKeypair() {
 function canonicalPayload(agentId, wants, ts, nonce) {
     return `v1|${agentId}|${wants.join(",")}|${ts}|${nonce}`;
 }
+/** 由 Keychain 私鑰推導返 raw 公鑰（32 bytes base64url），用嚟 register／rotate */
+function derivePublicKey(agentId) {
+    const privateKey = loadPrivateKey(agentId);
+    const publicKey = node_crypto_1.default.createPublicKey(privateKey);
+    const spki = publicKey.export({ type: "spki", format: "der" });
+    return Buffer.from(spki.subarray(spki.length - 32)).toString("base64url");
+}
 function signPayload(agentId, wants, ts, nonce) {
     const key = loadPrivateKey(agentId);
     const payload = canonicalPayload(agentId, wants, ts, nonce);
@@ -224,10 +231,25 @@ function cmdWhoami(config, flags) {
     console.log(`broker  : ${config.brokerUrl}`);
     console.log(`private : ${hasKey ? "✔ 已存在（" + (isMac ? "Keychain" : fileKeyPath(agent)) + "）" : "✖ 未建立"}`);
 }
+function cmdPubkey(config, flags) {
+    const agent = resolveAgent(config, flags);
+    console.log(derivePublicKey(agent));
+}
 async function cmdRegister(config, flags) {
-    const agent = flagString(flags, "agent") || die("用法：broker register --agent <id> --pubkey <raw> --entitlements a,b");
-    const pubkey = flagString(flags, "pubkey") || die("缺 --pubkey（broker init 會印出來）");
-    const entitlements = (flagString(flags, "entitlements") || "github").split(",").map((s) => s.trim()).filter(Boolean);
+    const agent = flagString(flags, "agent") || die("用法：broker register --agent <id> [--pubkey <raw>] [--entitlements a,b]");
+    const token = adminToken(flags);
+    const pubkey = flagString(flags, "pubkey") || derivePublicKey(agent);
+    let entitlements;
+    const entitlementsFlag = flagString(flags, "entitlements");
+    if (entitlementsFlag) {
+        entitlements = entitlementsFlag.split(",").map((s) => s.trim()).filter(Boolean);
+    }
+    else {
+        const existing = await callBroker(config, "GET", `/v1/agents/${agent}`, undefined, token);
+        entitlements = existing.status === 200 && Array.isArray(existing.json?.agent?.entitlements)
+            ? existing.json.agent.entitlements
+            : ["github"];
+    }
     const github = {};
     const installation = flagString(flags, "installation-id");
     if (installation)
@@ -244,7 +266,7 @@ async function cmdRegister(config, flags) {
         body.github = github;
     if (flags["status"] === "disabled")
         body.status = "disabled";
-    const res = await callBroker(config, "PUT", `/v1/agents/${agent}`, body, adminToken(flags));
+    const res = await callBroker(config, "PUT", `/v1/agents/${agent}`, body, token);
     if (res.status !== 201)
         die(`登記失敗：HTTP ${res.status} ${JSON.stringify(res.json)}`);
     console.log(`✔ 已登記 agent「${res.json?.agent.id}」，entitlements=${res.json?.agent.entitlements.join(",")}`);
@@ -272,6 +294,21 @@ async function cmdSecretPut(config, flags) {
     if (res.status !== 201)
         die(`寫入失敗：HTTP ${res.status}`);
     console.log(`✔ 已存入 ${agent}/${name}（${maskValue(value)}）`);
+    // --grant：自動把呢個 key 加入該 agent 嘅 entitlements（唔會覆蓋現有清單）
+    if (flags.grant) {
+        const token = adminToken(flags);
+        const existing = await callBroker(config, "GET", `/v1/agents/${agent}`, undefined, token);
+        if (existing.status !== 200 || !existing.json?.agent?.pubkey) {
+            console.log(`⚠ 未加到 entitlement：registry 內冇 agent「${agent}」，先跑 broker register`);
+            return;
+        }
+        const record = existing.json.agent;
+        const entitlements = Array.from(new Set([...(record.entitlements || []), name]));
+        const put = await callBroker(config, "PUT", `/v1/agents/${agent}`, { pubkey: record.pubkey, entitlements, github: record.github ?? null, status: record.status ?? "active" }, token);
+        if (put.status !== 201)
+            die(`加 entitlement 失敗：HTTP ${put.status}`);
+        console.log(`✔ entitlement 已更新：${entitlements.join(",")}`);
+    }
 }
 async function doClaim(config, agent, wants) {
     const ts = Math.floor(Date.now() / 1000);
@@ -360,14 +397,15 @@ function usage() {
 用法:
   broker init --agent <id> [--broker-url <url>] [--force]      建立 agent 身份（Ed25519，私鑰入 Keychain）
   broker whoami [--agent <id>]                                 顯示本機身份
+  broker pubkey [--agent <id>]                                 由私鑰推導公鑰（register 用，唔需要抄）
   broker health                                                檢查 broker
 
   broker claim [key...] [--print|--env|--json] [-agent <id>]   取 secret（預設遮罩摘要）
   broker exec [--keys github] -- <command...>                  取 secret 後注入環境變數再跑命令
 
-  broker register --agent <id> --pubkey <raw> ...              [admin] 登記 / 輪替公鑰
+  broker register --agent <id> [--pubkey <raw>] [--entitlements a,b]   [admin] 登記 / 輪替公鑰
   broker agents                                                [admin] 列出 registry
-  broker secret-put --agent <id> --name <key>                  [admin] 存靜態 secret（stdin 讀值）
+  broker secret-put --agent <id> --name <key> [--grant]        [admin] 存靜態 secret（stdin 讀值；--grant 自動加 entitlement）
   broker admin-login --token-stdin                             [admin] 存 admin token 入 Keychain
   broker rotate [--agent <id>]                                 換 keypair（之後要 register 新公鑰）
 
@@ -392,6 +430,9 @@ async function main() {
             return;
         case "whoami":
             cmdWhoami(config, flags);
+            return;
+        case "pubkey":
+            cmdPubkey(config, flags);
             return;
         case "health":
             await cmdHealth(config);
