@@ -1,0 +1,27 @@
+{
+  "name": "@nine-ai/secret-broker-cli",
+  "version": "0.1.0",
+  "description": "Global CLI for the per-agent Secret Broker (Ed25519 signed claim)",
+  "bin": {
+    "broker": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json || true",
+    "smoke": "node dist/index.js --help"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  },
+  "license": "MIT",
+  "private": true
+}

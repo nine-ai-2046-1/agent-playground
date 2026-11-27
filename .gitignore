@@ -1,0 +1,16 @@
+node_modules/
+dist/*.map
+.nyc_output/
+coverage/
+
+# secrets — 絕對唔可以入 repo
+.dev.vars
+.dev.vars.*
+*.pem
+private-key.pem
+private-key.pkcs8.pem
+pem.base64.txt
+*.base64.txt
+
+# wrangler
+.wrangler/

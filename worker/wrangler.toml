@@ -1,0 +1,15 @@
+name = "github-token-broker"
+main = "src/index.js"
+compatibility_date = "2026-11-27"
+
+# 對外只經 workers.dev；唔開 version preview URL（收窄公開面）
+workers_dev = true
+preview_urls = false
+
+[observability]
+enabled = true
+
+# agent registry / nonce / 靜態 secret 全部放 KV（唔入 code、唔入 git）
+[[kv_namespaces]]
+binding = "BROKER_KV"
+id = "dd244113e11148c883325bc4d3cfde3c"
