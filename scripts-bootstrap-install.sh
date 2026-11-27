@@ -62,10 +62,25 @@ case "$MODE" in
     [ -n "${GH_TOKEN:-}" ] || { echo "需要 GH_TOKEN（只讀 token；private repo 必需）" >&2; exit 1; }
     VER="${REL_TAG#v}"
     ASSET="nine-ai-secret-broker-cli-${VER}.tgz"
-    AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/octet-stream")
-    echo "→ 下載 pin 版 ${REL_TAG}（${ASSET}）" >&2
-    curl -fsSL --retry 3 -m 120 "${AUTH[@]}" -o "$TMP/$ASSET" "$BASE_URL/$REL_TAG/$ASSET"
-    curl -fsSL --retry 3 -m 60  "${AUTH[@]}" -o "$TMP/$ASSET.sha256" "$BASE_URL/$REL_TAG/$ASSET.sha256"
+    API="https://api.github.com/repos/${REPO_SLUG}"
+    AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" -H "User-Agent: broker-install")
+    echo "→ 取 pin 版 ${REL_TAG} 的 release metadata" >&2
+    REL_JSON="$(curl -fsSL --retry 3 -m 60 "${AUTH[@]}" -H "Accept: application/vnd.github+json" "$API/releases/tags/$REL_TAG")"
+    # 由 metadata 取 asset id（private repo 用 API asset URL 最穩；github.com/releases/download 會 404）
+    asset_id() {
+      printf '%s' "$REL_JSON" | node -e '
+        let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+          const j=JSON.parse(s); const name=process.argv[1];
+          const a=(j.assets||[]).find(x=>x.name===name);
+          if(!a){console.error("asset 唔存在: "+name);process.exit(1);}
+          process.stdout.write(String(a.id));
+        });' "$1"
+    }
+    echo "→ 下載 ${ASSET}" >&2
+    curl -fsSL --retry 3 -m 120 "${AUTH[@]}" -H "Accept: application/octet-stream" \
+      -o "$TMP/$ASSET" "$API/releases/assets/$(asset_id "$ASSET")"
+    curl -fsSL --retry 3 -m 60 "${AUTH[@]}" -H "Accept: application/octet-stream" \
+      -o "$TMP/$ASSET.sha256" "$API/releases/assets/$(asset_id "$ASSET.sha256")"
     sha256_check "$TMP" "$ASSET" "$ASSET.sha256" || { echo "✖ checksum 唔符，已中止" >&2; exit 1; }
     echo "✔ checksum 通過：" >&2; cat "$TMP/$ASSET.sha256" >&2
     TGZ_PATH="$TMP/$ASSET"
