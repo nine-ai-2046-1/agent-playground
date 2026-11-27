@@ -46,6 +46,19 @@ jobs:
       - name: 契約測試（mock KV，無網絡）
         run: node worker/scripts/contract-test.mjs
 
+      - name: Release 安裝路徑（pin + sha256 驗證）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL_TAG: v0.4.0
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$REL_TAG")
+          if [ "$code" = "200" ]; then
+            bash scripts-bootstrap-install.sh
+          else
+            echo "release $REL_TAG 未發佈（HTTP $code），跳過 N5 驗證"
+          fi
+
       - name: 建置 CLI
         run: |
           npm run build
