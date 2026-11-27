@@ -313,3 +313,31 @@ audit/<YYYY-MM-DD>/
 | L-3 | 非 macOS 冇 `admin-login` 持久化（每次要 export `BROKER_ADMIN_TOKEN`） | 可加 `~/.config/secret-broker/admin.token`（600） |
 
 **仍未做的環境**：Lima VM 未安裝（本機冇 `limactl`；OrbStack daemon 未起）。雲主機已提供乾淨 Linux，故未重複搭建。
+
+### F11 — 生產 E2E 收尾（GitHub Actions 乾淨出口，2026-11-27）
+
+本機（Clash Verge／MuCloud TUN fake-IP）同雲主機（proxy）出口都被攔，故改用 GitHub runner 做生產 E2E：`.github/workflows/e2e-prod.yml`（12 steps，`workflow_dispatch` / `push main` / `cron 0 1 * * *`），CI agent `ci-e2e-01`（生產 KV 已登記，entitlements `github`，`installation_id=185701417`，`repositories=["agent-playground"]`）。
+
+| 步 | 生產實測 | 結果 |
+| :-- | :-- | :-- |
+| 契約測試（mock KV） | 16/16 | PASS |
+| 退出碼契約（無參／缺參／未知指令） | 全 2 | PASS |
+| `GET /health` | 200，`ok=true`／`ed25519=true` | PASS |
+| `POST /github-token`（未 opt-in） | 404 | PASS |
+| `POST /v1/claim` 錯簽 | 401 | PASS |
+| 真 claim（`BROKER_PRIVATE_KEY` env → 生產 mint） | rc=0，`secrets.github.token` = 真 `ghs_…`（len 390），`expires_at` +60min，`permissions` 全表回傳 | **PASS** |
+
+run `45977991426`（commit `2d8c02d`）**success**；報告 `e2e-report.json` 已由 runner commit 回 main（`b949ef6`），內容只有 `prefix`／`len`／`expires_at`／`permissions`，**零 token 值**。
+
+**修正**：初版斷言讀 `secrets.<key>.value`（實際回 `token`）→ 假 FAILURE；已改 `token or value` 兼容並保留 `len>=80` 檢查。
+
+**已處理事故（token 外洩）**：
+
+| 項 | 處理 |
+| :-- | :-- |
+| `e2e-report.json` 曾含真 `ghs_…` 並 commit | `filter-branch --index-filter` 清全 history、force push；遠端 main 已無任何含該檔嘅 commit（逐 commit `ls-tree` 驗證） |
+| 含 token 嘅 run log | run `45977486051`／`45976193734`／`45976901143`／`45977148113` 已 `DELETE`（204，GET 回 404），log 已不存在 |
+| 撤銷該 token | GitHub 無公開撤銷 installation token 端點（`DELETE /installation/tokens` 以 installation token／App JWT 皆 404）；該 token 於 `2026-11-27T10:53:51Z` 到期，實測 `401` 已失效 |
+| 防止再犯 | workflow 改為只輸出 `prefix`／`len`／`expires_at`，token 明文只寫 `/tmp/claim.json` 並即時 `rm`，永不入 log／報告 |
+
+**結論**：NIN-183「生產 E2E 做唔到」嘅阻塞已解除（唔再依賴本機／雲機出口）。仍未做：`github_not_configured` 應回 503（L-1）、`claim --print` 語意（L-2）、非 macOS `admin-login` 持久化（L-3）、N2–N6。

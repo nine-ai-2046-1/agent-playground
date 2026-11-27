@@ -173,6 +173,20 @@ npx wrangler secret put LEGACY_REPOSITORIES     # 例：agent-playground（必�
 | `sec:<agent>:<name>` | 靜態 secret 原文（KV 本身已加密靜態儲存）|
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s（重放保護）|
 
+## CI 驗證（生產 E2E）
+
+`.github/workflows/e2e-prod.yml` 由 GitHub runner（乾淨出口）打生產 worker，補本機／內網出口被封嘅缺口。觸發：`workflow_dispatch`、`push main`、每日 `01:00 UTC`。
+
+Repo secrets（Settings → Secrets and variables → Actions）：
+
+| Secret | 值 |
+| :-- | :-- |
+| `BROKER_PRIVATE_KEY` | CI agent 私鑰（base64 PKCS#8，單行） |
+| `BROKER_AGENT_ID` | `ci-e2e-01`（生產 KV 已登記） |
+| `BROKER_URL` | `https://github-token-broker.baobao2046.workers.dev` |
+
+冇 secret 都跑得（只做 health／舊 endpoint 404／錯簽 401／契約測試）。報告寫入 `e2e-report.json` 並 commit 回 main（`[skip ci]`），**只含 token 嘅 `prefix`／`len`／`expires_at`／`permissions`，永不含 token 值**。
+
 ## 已知限制
 
 1. **Cloudflare Access 未開**：Zero Trust Free 要綁信用卡（$0 但要授權超額收費），所以邊緣層未有 Access Service Token；現時保護全靠 Worker 內簽名驗證。
