@@ -329,6 +329,54 @@ async function main() {
     `machine=${rows.find((r) => r.machine_id)?.machine_id ?? "none"}`,
   );
 
+  /* KV 寫入失敗（N7.1）：限流降級唔可以 500；nonce 寫唔到要 fail-closed 503 */
+  {
+    const mkEnvWithFailingPut = async (failPrefix, id) => {
+      const kvX = makeKV();
+      const kp = keypair();
+      await kvX.put(
+        `agent:${id}`,
+        JSON.stringify({ id, pubkey: kp.rawPub, status: "active", entitlements: ["demo.key"] }),
+      );
+      await kvX.put(`sec:${id}:demo.key`, await encryptSecret({ BROKER_MASTER_KEY: MASTER }, id, "demo.key", "v"));
+      const origPut = kvX.put.bind(kvX);
+      kvX.put = async (key, value, opts) => {
+        if (String(key).startsWith(failPrefix)) throw new Error("KV PUT failed: 429 write rate limited");
+        return origPut(key, value, opts);
+      };
+      return { env: { ...env, BROKER_KV: kvX }, kp };
+    };
+
+    for (const [label, prefix, expectStatus] of [
+      ["限流計數寫唔到 → 降級放行（唔可以 500）", "rl:", 200],
+      ["nonce 寫唔到 → 503 fail-closed", "nonce:", 503],
+    ]) {
+      const { env: envX, kp } = await mkEnvWithFailingPut(prefix, `kvfail-${prefix.replace(":", "")}`);
+      const agent = `kvfail-${prefix.replace(":", "")}`;
+      const ts = Math.floor(Date.now() / 1000);
+      const nonce = crypto.randomBytes(16).toString("base64url");
+      const res = await fetchHandler(
+        new Request("https://broker.test/v1/claim", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-broker-machine": MACHINE },
+          body: JSON.stringify({ agent_id: agent, wants: ["demo.key"], ts, nonce, sig: sign(kp.privateKey, agent, ["demo.key"], ts, nonce) }),
+        }),
+        envX,
+        ctx,
+      );
+      let body = {};
+      try {
+        body = JSON.parse(await res.text());
+      } catch (_) {}
+      check(label, res.status === expectStatus, `status=${res.status} body=${JSON.stringify(body)}`);
+      if (expectStatus === 503) {
+        check("503 帶 kv_unavailable + Retry-After", body.error === "kv_unavailable" && res.headers.get("retry-after") === "5", `retry-after=${res.headers.get("retry-after")}`);
+      } else {
+        check("降級時仍然派到 secret", body?.secrets?.["demo.key"]?.value === "v", "fail-open 只影響限流計數");
+      }
+    }
+  }
+
   /* 21. 所有抽查回應 no-store */
   const sampled = [health, unknown, stale, bad, notEnt, okRes, replay, gone, missing, legacy, noKey, r3];
   check("所有抽查回應都有 Cache-Control: no-store", sampled.every((r) => r.headers.get("cache-control") === "no-store"), `${sampled.length} 個回應`);

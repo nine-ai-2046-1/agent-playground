@@ -368,7 +368,19 @@ async function bumpRate(env, scope, subject) {
   if (used >= conf.limit) {
     return { allowed: false, used, limit: conf.limit, retryAfter: conf.window - (now % conf.window) };
   }
-  await env.BROKER_KV.put(key, String(used + 1), { expirationTtl: conf.window * 2 });
+  try {
+    await env.BROKER_KV.put(key, String(used + 1), { expirationTtl: conf.window * 2 });
+  } catch (error) {
+    // KV 同一個 key 每秒只可寫一次；突發請求會撞寫入上限。
+    // 呢個係「用量控制」而唔係「認證」—— 寫唔到就降級放行，唔可以變 500。
+    console.log(JSON.stringify({
+      event: "rate_limit_degraded",
+      scope,
+      reason: String((error && error.message) || error).slice(0, 80),
+      ts: new Date().toISOString(),
+    }));
+    return { allowed: true, used, limit: conf.limit, degraded: true };
+  }
   return { allowed: true, used: used + 1, limit: conf.limit };
 }
 
@@ -495,7 +507,21 @@ export default {
         audit(request, env, ctx, { agent_id: agentId, wants, result: "replay", status: 409 });
         return finish(json({ error: "replay_detected" }, 409));
       }
-      await env.BROKER_KV.put(nonceKey, "1", { expirationTtl: NONCE_TTL_SECONDS });
+      try {
+        await env.BROKER_KV.put(nonceKey, "1", { expirationTtl: NONCE_TTL_SECONDS });
+      } catch (error) {
+        // 重放保護寫唔到 = 唔可以派（fail closed），但要係乾淨 503 而唔係 500
+        audit(request, env, ctx, {
+          agent_id: agentId,
+          wants,
+          result: "kv_error",
+          status: 503,
+          details: { stage: "nonce", reason: sanitizeDetail((error && error.message) || "kv_write_failed") },
+        });
+        const res = json({ error: "kv_unavailable", retry_after: 5 }, 503);
+        res.headers.set("Retry-After", "5");
+        return finish(res);
+      }
 
       // entitlement 檢查：agent 只可以拿 registry 內列明嘅 secret
       const allowed = Array.isArray(agent.entitlements) ? agent.entitlements : [];

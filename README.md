@@ -327,6 +327,18 @@ wrangler secret put CLAIM_RATE_LIMIT   # 例：20
 
 > 限流係 best-effort：KV 最終一致，多 colo 之間可能有少量超額，用嚟擋失控 loop，唔係 DDoS 防護（邊緣層仍建議 Access／WAF）。
 
+## 突發請求會點（KV 寫入上限）
+
+Cloudflare KV 對同一個 key 有「每秒 1 次寫入」上限，密集 claim 會撞到：
+
+| 情況 | 你見到 | 系統做咗乜 |
+| :-- | :-- | :-- |
+| 限流計數寫唔到 | 正常派 key | 降級放行，log 記 `rate_limit_degraded`（唔會 500） |
+| 重放 nonce 寫唔到 | `503 kv_unavailable` + `Retry-After: 5` | 寧願唔派（fail-closed），避免重放 |
+| 短時間超過 40 次／分鐘 | `429 rate_limited` + `Retry-After` | 正常限流 |
+
+> 所以「一個 script 用一次 `exec` 包住」既係效率，亦係避免撞限流。
+
 ## 為何冇 admin API（2026-11-27 定案）
 
 | 原因 | 說明 |

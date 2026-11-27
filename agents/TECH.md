@@ -140,6 +140,19 @@ v1|<agent_id>|<wants.join(",")>|<ts>|<nonce>
 
 理由：Cloudflare 帳號成為唯一 root of trust（配合 2FA），CLI 原始碼公開派都冇能力寫伺服器資料；同時消除共享 token 帶嚟嘅暴力猜測／重放／靜默接管風險。
 
+### 5.3.1 KV 寫入上限嘅降級策略（N7.1）
+
+Cloudflare Workers KV 對**同一個 key** 有「每秒 1 次寫入」上限。突發 claim 會撞爆 `rl:claim:*`
+嘅寫入，繼而拋錯；處理不當會變成 Cloudflare 邊緣 500（HTML 錯誤頁）。
+
+| 情況 | 處理 | 理由 |
+| :-- | :-- | :-- |
+| 限流計數寫唔到 | **fail-open**：照派，console 記 `rate_limit_degraded` | 限流係用量控制，唔係認證邊界；唔可以因此中斷服務 |
+| 重放 nonce 寫唔到 | **fail-closed**：`503 kv_unavailable` + `Retry-After: 5`，audit `result=kv_error` | 寫唔到就唔知有冇重放，寧願唔派 |
+| D1 audit 寫唔到 | fail-open（只 console 記） | 審計唔可以阻塞派發 |
+
+契約測試有對應 4 項（mock KV 對 `rl:`／`nonce:` 拋錯）。
+
 ### 5.4 審計讀取（N4）
 
 冇 HTTP 讀取端點（避免多一個要認證嘅面）。查法：
