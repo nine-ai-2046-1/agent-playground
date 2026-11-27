@@ -1,16 +1,16 @@
 {
-  "at": "2026-11-27T15:15:21Z",
-  "commit": "e6232767673f200e6416b499eab079d4789918bc",
-  "runner": "GitHub Actions 1000000174",
+  "at": "2026-11-27T15:17:54Z",
+  "commit": "4bb10279bc68505fc710f5cb15432e84eeeaf8df",
+  "runner": "GitHub Actions 1000000175",
   "broker": "https://github-token-broker.baobao2046.workers.dev",
   "agent": "ci-e2e-01",
   "hasKey": true,
-  "result": "failed",
-  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/46023094629",
+  "result": "success",
+  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/46023505412",
   "claim": {
     "prefix": "ghs_",
     "len": 390,
-    "expires_at": "2026-11-27T16:14:35Z",
+    "expires_at": "2026-11-27T16:17:21Z",
     "permissions": {
       "pages": "write",
       "issues": "write",
@@ -25,5 +25,5 @@
       "repository_creation": "write"
     }
   },
-  "diag": "agent   : ci-e2e-01\nbroker  : https://github-token-broker.baobao2046.workers.dev\nprivate : ✔ 已存在（環境變數 BROKER_PRIVATE_KEY）\nrc=0\n"
+  "diag": null
 }
