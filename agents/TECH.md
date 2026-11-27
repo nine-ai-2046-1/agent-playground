@@ -244,7 +244,7 @@ npx wrangler deploy
 ```
 
 必要 secrets：`GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`。
-`BROKER_MASTER_KEY`（base64url 32 bytes；本機備份 `~/Doubao/secrets/broker-master-key.b64`，600）**只為讀舊 v1 信封而保留**；KV 全部轉 v2 後可以刪。
+`BROKER_MASTER_KEY`（base64url 32 bytes；本機備份 `~/Doubao/secrets/broker-master-key.b64`，600）**只為讀舊 v1 信封**。**2026-11-27 已喺生產刪除**（KV `sec:*` = 0 個）；之後 Worker 遇到 v1 信封會回 `503 encryption_not_configured`（fail closed）。
 
 `AGENT_TOKEN`／`AGENT_TOKEN_PREV` 已無程式引用，部署後應 `wrangler secret delete` 清走。
 
