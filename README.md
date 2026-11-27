@@ -242,6 +242,15 @@ wrangler secret put CLAIM_RATE_LIMIT   # 例：20
 - IP 只存 `SHA-256(CF-Connecting-IP)` 前 16 hex，唔存原文
 - 寫入用 `ctx.waitUntil`，D1 掛咗都唔會拖死 claim（只記 `audit:write_failed` 落 console）
 - **成功派發會更新 `agent:<id>.last_used_at` / `last_used_machine`**（housekeeping 用：超過 N 日冇用就考慮刪）
+- **Housekeeping 查詢**（搵邊個 agent 冇人用）：
+
+  ```bash
+  npx wrangler d1 execute broker-audit --remote --command \
+    "SELECT agent_id, MAX(ts) AS last_claim, COUNT(*) AS claims FROM audit WHERE result='ok' GROUP BY agent_id ORDER BY last_claim"
+  ```
+
+  超過 30 日冇 claim 就考慮喺 KV 刪 `agent:<id>`（同 KV 內嘅 `last_used_at` 對照）。
+
 - 查（Cloudflare 帳號層，冇 HTTP 讀取端點）：
   `wrangler d1 execute broker-audit --remote --command "SELECT ts,agent_id,result,status,ip_hash,machine_id FROM audit ORDER BY id DESC LIMIT 20"`
 
