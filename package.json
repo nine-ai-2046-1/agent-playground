@@ -1,6 +1,6 @@
 {
   "name": "@nine-ai/secret-broker-cli",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Global CLI for the per-agent Secret Broker (Ed25519 signed claim)",
   "bin": {
     "broker": "dist/index.js"

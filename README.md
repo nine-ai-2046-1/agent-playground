@@ -163,7 +163,7 @@ base = os.environ.get("AZURE_OPENAI_ENDPOINT")  # 有就自動有
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/nine-ai-2046-1/agent-playground/main/scripts-bootstrap-install.sh
-bash scripts-bootstrap-install.sh                 # 預設 pin v0.5.0
+bash scripts-bootstrap-install.sh                 # 預設 pin v0.6.0
 ```
 
 > 唔好用 `curl … | bash`：先落檔、睇一眼（起碼睇頭 30 行）再執行，呢個習慣比任何 checksum 都重要。
@@ -177,7 +177,7 @@ bash scripts-bootstrap-install.sh --dir .
 **C. 指定版本／應急**
 
 ```bash
-REL_TAG=v0.5.0 bash scripts-bootstrap-install.sh          # pin 其他 release
+REL_TAG=v0.6.0 bash scripts-bootstrap-install.sh          # pin 其他 release
 REF=main bash scripts-bootstrap-install.sh --from-git     # 唔 pin、無 checksum，只限應急
 ```
 
@@ -191,7 +191,7 @@ REF=main bash scripts-bootstrap-install.sh --from-git     # 唔 pin、無 checks
 驗證：
 
 ```bash
-broker --version     # broker 0.5.0
+broker --version     # broker 0.6.0
 broker endpoint show # (未設定)
 broker whoami
 ```

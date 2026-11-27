@@ -4,7 +4,7 @@
 # 三種模式：
 #   1) 預設（推薦）：由 GitHub Release 下載已 pin 嘅 tarball，驗 sha256 後安裝
 #        ./scripts-bootstrap-install.sh
-#        REL_TAG=v0.5.0 ./scripts-bootstrap-install.sh        # 指定 pin 到其他 release
+#        REL_TAG=v0.6.0 ./scripts-bootstrap-install.sh        # 指定 pin 到其他 release
 #   2) --from-git    ：由 repo 指定 ref clone（唔 pin、無 checksum；只作應急）
 #        REF=main ./scripts-bootstrap-install.sh --from-git
 #   3) --dir <path>  ：由已 clone 的本地目錄 npm pack（完全離線）
@@ -21,7 +21,7 @@ set -euo pipefail
 REPO_SLUG="${REPO_SLUG:-nine-ai-2046-1/agent-playground}"
 REPO_URL="${REPO_URL:-https://github.com/${REPO_SLUG}.git}"
 BASE_URL="${BASE_URL:-https://github.com/${REPO_SLUG}/releases/download}"
-REL_TAG="${REL_TAG:-v0.5.0}"   # 預設 pin 版本
+REL_TAG="${REL_TAG:-v0.6.0}"   # 預設 pin 版本
 REF="${REF:-main}"
 MODE="release"
 DIR=""

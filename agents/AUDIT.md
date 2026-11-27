@@ -97,7 +97,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | 安裝安全 | `scripts-bootstrap-install.sh` | token 走 `GIT_ASKPASS`，唔入 argv；`GIT_TERMINAL_PROMPT=0` |
 | Secret 不入 repo | `.gitignore`（`.dev.vars`、`*.pem`、`*.base64.txt`）| 已掃過全 git 歷史：零 PEM／零 token 真值 |
 | 可重跑契約測試 | `worker/scripts/contract-test.mjs` | 30 項，自帶 mock KV + mock D1，無需 wrangler／網絡；CI 可直接跑 |
-| 安裝 pin + checksum | `scripts-bootstrap-install.sh` + Release `v0.5.0` | 默認抓 release tarball 並驗 `.sha256` + 版本核對；`--from-git` 為應急 |
+| 安裝 pin + checksum | `scripts-bootstrap-install.sh` + Release `v0.6.0` | 默認抓 release tarball 並驗 `.sha256` + 版本核對；`--from-git` 為應急 |
 | argv 洩漏防線 | CLI 已冇任何寫入指令；secret 只經 stdin／env／Keychain | 密文由本機 `scripts/secret-envelope.mjs` 產生 |
 
 ---
@@ -123,7 +123,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | R6 | **冇 rate limit／abuse 偵測** | **部分緩解（N2）**：claim 40/min per agent+IP、admin 60/min、audit 30/min，429 有 `Retry-After`。未做告警／異常偵測 | 加告警（429 突增、多 IP 同 agent）；KV 最終一致，跨 colo 可能超額 |
 | R7 | **Audit log 只有 `console.log`** | **已修（N4／N7）**：claim 落 D1 `audit`（加 `machine_id`），用 wrangler／SQL 查。仍未做告警／Logpush／append-only 保證 | 加 Logpush；D1 只留 Worker 寫權限 |
 | R8 | **Agent 自身可被騎劫（prompt injection）** | broker 保證「有權才拿到」，唔保證「拿到後唔漏」 | egress 白名單、log 掃描、secret 只在子進程 env |
-| R9 | **CLI 安裝管道跟 HEAD** | **已修（N5）**：默認安裝 Release `v0.5.0` tarball 並驗 `.sha256` + 版本；`--from-git` 只作應急 | 可再加 minisign／固定 digest 白名單 |
+| R9 | **CLI 安裝管道跟 HEAD** | **已修（N5）**：默認安裝 Release `v0.6.0` tarball 並驗 `.sha256` + 版本；`--from-git` 只作應急 | 可再加 minisign／固定 digest 白名單 |
 
 ### P2（環境與衛生）
 
@@ -131,7 +131,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | :-- | :-- | :-- | :-- |
 | R10 | Workers.dev 端點完全公開 | 冇 Access（要信用卡，已暫緩）；任何人可探測／DoS | 免費 WAF rate-limit rule；或自訂域名 + Access |
 | R11 | 假 broker／MITM | 回應冇簽名；config `brokerUrl` 明文可改 | broker 回應簽名 + CLI 公鑰 pin；config 加 pin |
-| R13 | 源碼公開（2026-11-27 已轉 public） | **已核（掃描通過）**：全歷史 52 commit／3 ref（main＋v0.4.0＋v0.5.0）／25 個 Actions run log 全部零真 secret（regex：`gh[shup]_[A-Za-z0-9]{30,}`、PEM 私鑰本體、`github_pat_`、`AKIA`）；工作樹無 `.dev.vars`／`.pem`／`*.base64.txt`；KV `sec:*` 0 個、無明文；Worker 無 admin API；CLI 無 delete | 公開後仍要守住：Cloudflare 帳號 2FA、App 只用最小權限、任何新 secret 一律唔入 repo／log；`wrangler.toml` 內 KV／D1 id 與 worker 名屬識別碼（非憑證），如要連識別碼都藏，改用私有 fork 部署 |
+| R13 | 源碼公開（2026-11-27 已轉 public） | **已核（掃描通過）**：全歷史 52 commit／3 ref（當時 main＋v0.4.0＋v0.5.0；舊 tag 已於 2026-11-28 收乾淨，只剩 v0.6.0）／25 個 Actions run log 全部零真 secret（regex：`gh[shup]_[A-Za-z0-9]{30,}`、PEM 私鑰本體、`github_pat_`、`AKIA`）；工作樹無 `.dev.vars`／`.pem`／`*.base64.txt`；KV `sec:*` 0 個、無明文；Worker 無 admin API；CLI 無 delete | 公開後仍要守住：Cloudflare 帳號 2FA、App 只用最小權限、任何新 secret 一律唔入 repo／log；`wrangler.toml` 內 KV／D1 id 與 worker 名屬識別碼（非憑證），如要連識別碼都藏，改用私有 fork 部署 |
 | R12 | 本機殘留 | **已修（N6）**：PEM 已搬 `~/Doubao/secrets/cloudflare-app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；master key 600。`.dev.vars` 仍留（600，本機開發用） | `.dev.vars` 可改由 Keychain／1Password CLI 注入 |
 | R13 | 撤銷後仍可能短暫可用 | KV 一致性 + token 已 mint（最長 1 小時）| 文件講清楚：撤銷 = 停止**新** token，已發 token 自然到期 |
 | R14 | 舊 `/github-token` endpoint | **已默認下架**：無 `LEGACY_BEARER_ENABLED=true` 一律 404；啟用時必須有 `LEGACY_REPOSITORIES` allowlist，否則 403 | 保留 opt-in 供 V1/V2 回歸；長期可完全刪碼 |
@@ -289,7 +289,7 @@ audit/<YYYY-MM-DD>/
 | N2 | Admin token 單點、無 rotation／rate limit | ✅ **已消除（N7）**：admin API 全撤、共享 token 刪除、claim 限流保留 | 部署後確認 `/v1/admin/*` 404、secrets 內無 `AGENT_TOKEN*` |
 | N3 | 靜態 secret 原文存 KV | ✅ **已修（2026-11-27）**：AES-256-GCM 信封加密（AAD 綁 agent+name），KV 只存 `{v,alg,iv,ct}`；未設 key 寫入 503（fail closed）；舊明文可讀；遷移改用 `scripts/secret-envelope.mjs`；契約測試 22/22 | 生產 `BROKER_MASTER_KEY` 已上（worker `540987ca`） |
 | N4 | audit log 只 console.log | 需 D1／R2 或 Logpush | Roadmap 第 6 項 |
-| N5 | CLI 安裝仍可跟 HEAD | ✅ **已修（2026-11-27）**：`scripts-bootstrap-install.sh` 預設走 release `v0.5.0` tarball，下載 `.sha256` 驗證後才 `npm i -g`，並核對 `broker --version` 同 tag 一致；`--from-git` 只在應急用；CI 每次跑都實測 release 安裝路徑 | 實測：private repo 嘅 `releases/download` URL 回 404，已改 API asset URL |
+| N5 | CLI 安裝仍可跟 HEAD | ✅ **已修（2026-11-27）**：`scripts-bootstrap-install.sh` 預設走 release `v0.6.0` tarball，下載 `.sha256` 驗證後才 `npm i -g`，並核對 `broker --version` 同 tag 一致；`--from-git` 只在應急用；CI 每次跑都實測 release 安裝路徑 | 實測：private repo 嘅 `releases/download` URL 回 404，已改 API asset URL |
 | N6 | 本機殘留 `.dev.vars`／`~/Downloads/*.pem` | ✅ **已完成（2026-11-27）**：App PEM（原 644）已搬去 `~/Doubao/secrets/cloudflare-app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；`.dev.vars` 600 只留本機 dev 用 | master key 亦存 `~/Doubao/secrets/broker-master-key.b64`（600） |
 
 ### 此批次的新基線
