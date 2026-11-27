@@ -72,7 +72,7 @@ const leaks = (text, extra = []) => {
 {
   const r = await req("GET", "/health");
   check("health 200", r.status === 200, `status=${r.status}`);
-  const allowed = ["ok", "ed25519", "encryption", "audit", "rate_limit", "version", "ts"];
+  const allowed = ["ok", "kv", "ed25519", "encryption", "audit", "rate_limit", "version", "ts"];
   let keys = [];
   try {
     keys = Object.keys(JSON.parse(r.text));
@@ -98,7 +98,8 @@ const leaks = (text, extra = []) => {
     "/V1/AGENTS",
     "/v1/Agents/ci-e2e-01",
     "/v1/agents/ci-e2e-01/../../secrets/a/b",
-    "/v1/claim?debug=1",
+    "/v1/agents?debug=1",
+    "/v1/agents?limit=1000",
   ];
   let bad = [];
   for (const p of paths) {
@@ -154,7 +155,7 @@ if (key) {
     ["時間戳 +10 分鐘", { ...base, ts: now() + 600, sig: sign(AGENT, ["github"], now() + 600, base.nonce) }, 401],
     ["nonce 太短", { ...base, nonce: "abc", sig: sign(AGENT, ["github"], base.ts, "abc") }, 400],
     ["agent 名唔存在（格式合法）", { ...base, agent_id: "ghost-agent-x9", sig: sign("ghost-agent-x9", ["github"], base.ts, base.nonce) }, 401],
-    ["agent 名大寫（繞過大小寫）", { ...base, agent_id: AGENT.toUpperCase(), sig: sign(AGENT.toUpperCase(), ["github"], base.ts, base.nonce) }, 401],
+    ["agent 名大寫（繞過大小寫）", { ...base, agent_id: AGENT.toUpperCase(), sig: sign(AGENT.toUpperCase(), ["github"], base.ts, base.nonce) }, 400],
     ["agent 名路徑穿越", { ...base, agent_id: "../../admin", sig: sign("../../admin", ["github"], base.ts, base.nonce) }, 400],
     ["wants 空陣列", { ...base, wants: [], sig: sign(AGENT, [], base.ts, base.nonce) }, 400],
     ["wants 超過 12 個", { ...base, wants: Array.from({ length: 13 }, (_, i) => `k${i}`), sig: sign(AGENT, Array.from({ length: 13 }, (_, i) => `k${i}`), base.ts, base.nonce) }, 400],
@@ -192,12 +193,25 @@ if (key) {
   check("未授權 secret → 403", denied.status === 403, `status=${denied.status}`);
   const deniedA = await req("POST", "/v1/claim", mk(["definitely.not.exist"]));
   const deniedB = await req("POST", "/v1/claim", mk(["another.unknown.key"]));
+  let jA = {};
+  let jB = {};
+  try {
+    jA = JSON.parse(deniedA.text);
+    jB = JSON.parse(deniedB.text);
+  } catch (_) {}
+  // 重要：伺服器只可以回「你要求嘅名 + 拒絕原因」，唔可以加任何「其實存在／唔存在」嘅暗示
+  const shapeA = Object.keys(jA).sort().join(",");
+  const shapeB = Object.keys(jB).sort().join(",");
   check(
     "未知 secret 名唔形成存在性 oracle",
-    deniedA.status === 403 && deniedB.status === 403 &&
-      JSON.parse(deniedA.text).error === JSON.parse(deniedB.text).error &&
-      JSON.stringify(JSON.parse(deniedA.text).denied) === JSON.stringify(JSON.parse(deniedB.text).denied),
-    `${deniedA.status}/${deniedB.status}`,
+    deniedA.status === 403 &&
+      deniedB.status === 403 &&
+      jA.error === "not_entitled" &&
+      jA.error === jB.error &&
+      shapeA === shapeB &&
+      JSON.stringify(jA.denied) === JSON.stringify(["definitely.not.exist"]) &&
+      JSON.stringify(jB.denied) === JSON.stringify(["another.unknown.key"]),
+    `${deniedA.status}/${deniedB.status} shape=${shapeA}（只回自己要求嘅名）`,
   );
   check("403 唔回傳 secret 值或長度", !/len=|sha256:/i.test(deniedA.text + deniedB.text), "");
 
