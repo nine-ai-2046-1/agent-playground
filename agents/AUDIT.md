@@ -131,7 +131,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | :-- | :-- | :-- | :-- |
 | R10 | Workers.dev 端點完全公開 | 冇 Access（要信用卡，已暫緩）；任何人可探測／DoS | 免費 WAF rate-limit rule；或自訂域名 + Access |
 | R11 | 假 broker／MITM | 回應冇簽名；config `brokerUrl` 明文可改 | broker 回應簽名 + CLI 公鑰 pin；config 加 pin |
-| R12 | 本機殘留 | **已修（N6）**：PEM 已搬 `~/Doubao/secrets/baobao2046.app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；master key 600。`.dev.vars` 仍留（600，本機開發用） | `.dev.vars` 可改由 Keychain／1Password CLI 注入 |
+| R12 | 本機殘留 | **已修（N6）**：PEM 已搬 `~/Doubao/secrets/cloudflare-app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；master key 600。`.dev.vars` 仍留（600，本機開發用） | `.dev.vars` 可改由 Keychain／1Password CLI 注入 |
 | R13 | 撤銷後仍可能短暫可用 | KV 一致性 + token 已 mint（最長 1 小時）| 文件講清楚：撤銷 = 停止**新** token，已發 token 自然到期 |
 | R14 | 舊 `/github-token` endpoint | **已默認下架**：無 `LEGACY_BEARER_ENABLED=true` 一律 404；啟用時必須有 `LEGACY_REPOSITORIES` allowlist，否則 403 | 保留 opt-in 供 V1/V2 回歸；長期可完全刪碼 |
 
@@ -252,10 +252,10 @@ audit/<YYYY-MM-DD>/
 | 項目 | 值 |
 | :-- | :-- |
 | Worker 版本 | `82bbb354-7aa6-4516-807e-77f4dc24aad1`（2026-11-27 修復批次部署）|
-| Worker URL | `https://github-token-broker.baobao2046.workers.dev` |
-| KV namespace | `BROKER_KV` = `dd244113e11148c883325bc4d3cfde3c` |
+| Worker URL | `https://<worker>.<subdomain>.workers.dev` |
+| KV namespace | `BROKER_KV` = `<kv-namespace-id>` |
 | 生產 registry | 只有 `agent:opencode-01`（entitlements `github`，repo 限 `agent-playground`）|
-| Cloudflare | account `f00aad142d5151b962fc5af7bcd88395`、subdomain `baobao2046` |
+| Cloudflare | account `<cloudflare-account-id>`、subdomain `<subdomain>` |
 | GitHub App | App ID `5918124`、Installation `185701417`、`repository_selection = all` |
 | CLI | `@nine-ai/secret-broker-cli` 0.4.0、repo `nine-ai-2046-1/agent-playground`（private）|
 | 已知死路 | 本機／雲機／瀏覽器都連唔到 workers.dev；Access 需要信用卡 |
@@ -289,7 +289,7 @@ audit/<YYYY-MM-DD>/
 | N3 | 靜態 secret 原文存 KV | ✅ **已修（2026-11-27）**：AES-256-GCM 信封加密（AAD 綁 agent+name），KV 只存 `{v,alg,iv,ct}`；未設 key 寫入 503（fail closed）；舊明文可讀；遷移改用 `scripts/secret-envelope.mjs`；契約測試 22/22 | 生產 `BROKER_MASTER_KEY` 已上（worker `540987ca`） |
 | N4 | audit log 只 console.log | 需 D1／R2 或 Logpush | Roadmap 第 6 項 |
 | N5 | CLI 安裝仍可跟 HEAD | ✅ **已修（2026-11-27）**：`scripts-bootstrap-install.sh` 預設走 release `v0.5.0` tarball，下載 `.sha256` 驗證後才 `npm i -g`，並核對 `broker --version` 同 tag 一致；`--from-git` 只在應急用；CI 每次跑都實測 release 安裝路徑 | 實測：private repo 嘅 `releases/download` URL 回 404，已改 API asset URL |
-| N6 | 本機殘留 `.dev.vars`／`~/Downloads/*.pem` | ✅ **已完成（2026-11-27）**：App PEM（原 644）已搬去 `~/Doubao/secrets/baobao2046.app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；`.dev.vars` 600 只留本機 dev 用 | master key 亦存 `~/Doubao/secrets/broker-master-key.b64`（600） |
+| N6 | 本機殘留 `.dev.vars`／`~/Downloads/*.pem` | ✅ **已完成（2026-11-27）**：App PEM（原 644）已搬去 `~/Doubao/secrets/cloudflare-app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；`.dev.vars` 600 只留本機 dev 用 | master key 亦存 `~/Doubao/secrets/broker-master-key.b64`（600） |
 
 ### 此批次的新基線
 

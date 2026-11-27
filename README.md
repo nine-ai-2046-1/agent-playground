@@ -157,42 +157,105 @@ base = os.environ.get("AZURE_OPENAI_ENDPOINT")  # 有就自動有
 | `agents/TECH.md` | 給接手開發的 agent（架構、API 契約、部署／發版 playbook） |
 | `agents/AUDIT.md` | 給 audit agent（宣稱清單、風險登記冊、audit playbook） |
 
-## 安裝
+## 安裝（公開 repo，**唔需要** GitHub token）
 
-**推薦：由 release tarball 裝（pin 版本 + sha256 驗證）**
+**A. 一鍵（推薦；pin release ＋ sha256 驗證）**
 
 ```bash
-# A. 一鍵（推薦；private repo 需要只讀 token：fine-grained PAT 只勾 Contents:Read，或 GitHub App installation token）
-read -rsp 'GitHub read token: ' GH_TOKEN && echo
-GH_TOKEN="$GH_TOKEN" bash scripts-bootstrap-install.sh            # 預設 pin v0.5.0
+curl -fsSLO https://raw.githubusercontent.com/nine-ai-2046-1/agent-playground/main/scripts-bootstrap-install.sh
+bash scripts-bootstrap-install.sh                 # 預設 pin v0.5.0
+```
 
-# 想 pin 其他已發佈版本：
-GH_TOKEN="$GH_TOKEN" REL_TAG=v0.5.0 bash scripts-bootstrap-install.sh
+> 唔好用 `curl … | bash`：先落檔、睇一眼（起碼睇頭 30 行）再執行，呢個習慣比任何 checksum 都重要。
 
-# B. 已經手動 clone 落機（完全離線，唔需要 token）
-bash ~/src/agent-playground/scripts-bootstrap-install.sh --dir ~/src/agent-playground
+**B. 已經 clone 落機（完全離線）**
 
-# C. 應急：直接由 repo ref 裝（唔 pin、無 checksum，只限網絡故障時）
-GH_TOKEN="$GH_TOKEN" REF=main bash scripts-bootstrap-install.sh --from-git
+```bash
+bash scripts-bootstrap-install.sh --dir .
+```
+
+**C. 指定版本／應急**
+
+```bash
+REL_TAG=v0.5.0 bash scripts-bootstrap-install.sh          # pin 其他 release
+REF=main bash scripts-bootstrap-install.sh --from-git     # 唔 pin、無 checksum，只限應急
 ```
 
 安裝流程（A 模式）：
 
-1. `GET /repos/…/releases/tags/<REL_TAG>` 取 asset id（private repo 用 API asset URL；`github.com/…/releases/download/…` 會 404）
-2. 下載 `nine-ai-secret-broker-cli-<ver>.tgz` 同同名 `.sha256`
-3. `sha256sum -c` 驗證，唔符即中止（**唔會**裝落去）
-4. `npm i -g` tarball，最後核對 `broker --version` 同 release tag 一致
+1. 由 `github.com/nine-ai-2046-1/agent-playground/releases/download/<tag>/` 下載 `nine-ai-secret-broker-cli-<ver>.tgz` 同 `.sha256`（匿名，唔使登入）
+2. `sha256sum -c` 驗證，唔符即中止（**唔會**裝落去）
+3. `npm i -g` tarball
+4. 核對 `broker --version` 同 release tag 一致
 
 驗證：
 
 ```bash
-broker --version     # 例：broker 0.4.0
-broker help
+broker --version     # broker 0.5.0
+broker endpoint show # (未設定)
 broker whoami
 ```
 
-> 唔建議 `npm i -g github:nine-ai-2046-1/agent-playground`：會跟隨 `main` HEAD（供應鏈風險），
+> 唔建議 `npm i -g github:nine-ai-2046-1/agent-playground`：會跟 `main` HEAD（供應鏈風險），
 > 而且喺已有安裝上重裝會撞 npm `ENOTEMPTY`。要用就用 `--from-git` 加 `REF=<tag 或 commit sha>`。
+> `GH_TOKEN` 只係可選（私有 fork／企業鏡像／GitHub API 限流時用），正常公開安裝唔需要。
+
+## 叫 agent 幫你裝（copy 貼呢段 prompt）
+
+> 用法：開一個 coding agent（Claude Code、Codex、Cursor、任何可以行 shell 嘅 agent），
+> 原段貼落去，然後只答佢問你嘅嘢（endpoint、agent 名）。**唔需要**畀任何 token 佢。
+
+```text
+你係我部機嘅安裝助手，幫我裝好 Secret Broker CLI：
+repo = https://github.com/nine-ai-2046-1/agent-playground
+
+規則（唔可以違反）：
+1. 唔准要求我提供任何 admin token、Cloudflare API token、GitHub token；你唔需要呢啲。
+2. 唔准把任何 secret 值（API key、token、PEM、私鑰）寫入檔案、log、shell history，或者貼出嚟。
+3. 唔准自己改 Cloudflare KV／D1／Worker secret；凡要寫 Cloudflare 嘅步驟，只列指令同 JSON 交我人手做。
+4. endpoint 一定要 https（只有 localhost 可以 http）；我未提供就先問我，唔好猜、唔好寫死。
+5. 每一步做完先講結果，失敗就照實報，唔好靜靜重試幾十次。
+
+步驟：
+1. 檢查環境：node >= 20、npm 可用、作業系統。唔夠就報我，唔好自己亂裝系統套件。
+2. 安裝（pin release + sha256）：
+   curl -fsSLO https://raw.githubusercontent.com/nine-ai-2046-1/agent-playground/main/scripts-bootstrap-install.sh
+   bash scripts-bootstrap-install.sh
+   broker --version   # 應該係 0.5.x
+3. 問我攞 broker endpoint（例如 https://xxx.yyy.workers.dev），然後：
+   broker endpoint set <我提供嘅 URL>
+   broker endpoint show   # 確認存咗喺 ~/.config/secret-broker/endpoint
+4. 幫我建立 agent 身份（名由我提供；格式 ^[a-z0-9][a-z0-9._-]{1,47}$）：
+   broker init --agent <名>
+   broker ask-register --agent <名> --entitlements github --installation-id <我提供嘅 id>
+   把印出嘅 JSON 同 wrangler 指令「原文」貼返畀我（唔好自己執行寫入）。
+5. 驗證：broker whoami、broker health。
+   如果 health 連唔到（公司網、proxy、SNI 封鎖），照實講，並建議改用 GitHub Actions 或者換網絡，唔好硬試。
+6. 總結：版本、endpoint、agent 名、仲有邊幾步要我在 Cloudflare 帳號做（KV 寫入 + entitlements）。
+```
+
+英文版（同一個 prompt，方便貼去英文 agent）：
+
+```text
+You are my install assistant. Install the Secret Broker CLI from
+https://github.com/nine-ai-2046-1/agent-playground on this machine.
+
+Hard rules:
+1. Never ask me for an admin token, Cloudflare API token, or GitHub token. You do not need them.
+2. Never write or print any secret value (API key, token, PEM, private key) into files, logs, or shell history.
+3. Never modify Cloudflare KV / D1 / Worker secrets yourself. For any Cloudflare step, print the exact command/JSON and let me run it.
+4. Endpoint must be https (http only for localhost). Ask me for it; never hardcode or guess.
+5. Report each step's result. On failure, say so plainly; do not silently retry dozens of times.
+
+Steps:
+1. Check node >= 20, npm, OS.
+2. curl -fsSLO https://raw.githubusercontent.com/nine-ai-2046-1/agent-playground/main/scripts-bootstrap-install.sh && bash scripts-bootstrap-install.sh && broker --version
+3. Ask me for the broker endpoint, then: broker endpoint set <url>; broker endpoint show
+4. broker init --agent <name>; broker ask-register --agent <name> --entitlements github --installation-id <id>
+   Print the resulting JSON and wrangler command verbatim; do not run the write.
+5. broker whoami; broker health. If the network blocks it, report honestly instead of retrying.
+6. Summarise version, endpoint, agent name, and which steps I still need to do in Cloudflare.
+```
 
 ## 快速開始（4 步）
 
@@ -326,7 +389,7 @@ printf 'my-smtp-password' | node scripts/secret-envelope.mjs --agent opencode-01
 
 ## 限流（N2）
 
-固定窗（KV 計數，60s 視窗），超限即 `429` + `Retry-After: <秒>`：
+固定窗（**D1 權威計數**，60s 視窗），超限即 `429` + `Retry-After: <秒>`：
 
 | 桶 | 默認 | 覆寫 secret | key |
 | :-- | :-- | :-- | :-- |
@@ -336,7 +399,15 @@ printf 'my-smtp-password' | node scripts/secret-envelope.mjs --agent opencode-01
 wrangler secret put CLAIM_RATE_LIMIT   # 例：20
 ```
 
-> 限流係 best-effort：KV 最終一致，多 colo 之間可能有少量超額，用嚟擋失控 loop，唔係 DDoS 防護（邊緣層仍建議 Access／WAF）。
+| 計數層 | 用途 |
+| :-- | :-- |
+| D1 `rate_limit` 表 | **權威**：`INSERT … ON CONFLICT … RETURNING used`，跨 isolate／colo 一致 |
+| KV `rl:*` | D1 唔可用時嘅後備（同 key 每秒限一寫） |
+| isolate 內存 | 最後防線（只喺 D1＋KV 都寫唔到時用） |
+
+> 為何要 D1：KV 同 key 每秒限一寫，突發請求全部跌落內存；而 Cloudflare 可以為每個請求開新 isolate，
+> 內存計數唔共享 → 紅隊實測 45 連發全部 200（等於冇限流）。D1 版修後第 43 次出 `429`。
+> 限流仍然係 best-effort（擋失控 loop／簽名爆破），唔係 DDoS 防護（邊緣層建議 Access／WAF）。
 
 ## 突發請求會點（KV 寫入上限）
 
@@ -344,7 +415,7 @@ Cloudflare KV 對同一個 key 有「每秒 1 次寫入」上限，密集 claim 
 
 | 情況 | 你見到 | 系統做咗乜 |
 | :-- | :-- | :-- |
-| 限流計數寫唔到 | 正常派 key | 降級放行，log 記 `rate_limit_degraded`（唔會 500） |
+| D1 寫唔到（罕見） | 正常派 key 或 429 | 退 KV → 內存，逐級降級，log 記 `rate_limit_d1_failed`（唔會 500） |
 | 重放 nonce 寫唔到 | `503 kv_unavailable` + `Retry-After: 5` | 寧願唔派（fail-closed），避免重放 |
 | 短時間超過 40 次／分鐘 | `429 rate_limited` + `Retry-After` | 正常限流 |
 
@@ -428,7 +499,7 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 | :-- | :-- |
 | `BROKER_PRIVATE_KEY` | CI agent 私鑰（base64 PKCS#8，單行） |
 | `BROKER_AGENT_ID` | `ci-e2e-01`（生產 KV 已登記） |
-| `BROKER_URL` | `https://github-token-broker.baobao2046.workers.dev` |
+| `BROKER_URL` | `https://<worker>.<subdomain>.workers.dev` |
 
 冇 secret 都跑得（只做 health／舊 endpoint 404／錯簽 401／契約測試）。報告寫入 `e2e-report.json` 並 commit 回 main（`[skip ci]`），**只含 token 嘅 `prefix`／`len`／`expires_at`／`permissions`，永不含 token 值**。
 
@@ -436,7 +507,8 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 
 1. **Cloudflare Access 未開**：Zero Trust Free 要綁信用卡（$0 但要授權超額收費），所以邊緣層未有 Access Service Token；現時保護全靠 Worker 內簽名驗證。
 2. registry 只可以由 Cloudflare 帳號寫入（已冇 admin API）。**Cloudflare 帳號 = 唯一 root of trust**：請務必開 2FA、用最小權限 API token。
-3. **私鑰單點（v2）**：agent 私鑰遺失＝永久解唔到已密封嘅 secret（依定案「失鑰不救」，要用 `broker rotate` 換 keypair 再重新 seal 全部 secret）。舊 `v:1` 信封另需 `BROKER_MASTER_KEY`（只為向後兼容而保留）。
+3. **源碼公開嘅前提**（2026-11-27 已做全歷史掃描：52 commit／3 ref／25 run log 零真 secret）：Worker 冇 admin API、KV 只存公鑰／密文、CLI 冇 delete 能力，所以 source 公開唔等於畀人入去；**唯一 root of trust 仍然係 Cloudflare 帳號**（請開 2FA、用最小權限 token）。公開後 `wrangler.toml` 內 KV／D1 id 同 worker 名係可見嘅（呢啲係識別碼，唔係憑證）。
+4. **私鑰單點（v2）**：agent 私鑰遺失＝永久解唔到已密封嘅 secret（依定案「失鑰不救」，要用 `broker rotate` 換 keypair 再重新 seal 全部 secret）。舊 `v:1` 信封另需 `BROKER_MASTER_KEY`（只為向後兼容而保留）。
 4. `wants` 最多 12 項，`repositories` 最多 20 個。
 5. 舊 bearer endpoint 仍然存在，文件齊備後應下架。
 

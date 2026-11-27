@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# bootstrap-install.sh — 在 agent 機器安裝 broker CLI（預設走「已發佈 release」＋checksum 驗證）
+# bootstrap-install.sh — 在 agent 機器安裝 broker CLI（公開 repo，唔需要 token）
 #
 # 三種模式：
 #   1) 預設（推薦）：由 GitHub Release 下載已 pin 嘅 tarball，驗 sha256 後安裝
-#        GH_TOKEN=<只讀 Contents:Read 的 token> ./scripts-bootstrap-install.sh
+#        ./scripts-bootstrap-install.sh
 #        REL_TAG=v0.5.0 ./scripts-bootstrap-install.sh        # 指定 pin 到其他 release
 #   2) --from-git    ：由 repo 指定 ref clone（唔 pin、無 checksum；只作應急）
-#        GH_TOKEN=… REF=main ./scripts-bootstrap-install.sh --from-git
+#        REF=main ./scripts-bootstrap-install.sh --from-git
 #   3) --dir <path>  ：由已 clone 的本地目錄 npm pack（完全離線）
 #        ./scripts-bootstrap-install.sh --dir /path/to/agent-playground
 #
 # 設計要點：
 #   * 預設唔跟 HEAD：pin 到 release tag，並用 release 內嘅 .sha256 驗證（供應鏈防護）
-#   * token 只經 curl header / GIT_ASKPASS 傳遞，唔入 argv / shell history
+#   * 公開 repo：預設匿名下載；GH_TOKEN 只係可選（fork／企業鏡像／API 限流時用）
+#   * token（如有）只經 curl header / GIT_ASKPASS 傳遞，唔入 argv / shell history
 #   * 用 npm pack → 裝 tarball，避免 npm 直連 GitHub（亦避開 install-links 的 ENOTEMPTY）
 #   * 安裝後驗證 broker 可執行 + 版本符合 release tag
 set -euo pipefail
@@ -50,37 +51,44 @@ case "$MODE" in
     cd "$DIR"; TGZ_PATH="./$(npm pack --silent | tail -1)"
     ;;
   git)
-    [ -n "${GH_TOKEN:-}" ] || { echo "需要 GH_TOKEN（只讀 token）或 --dir" >&2; exit 1; }
-    ASKPASS="$TMP/.askpass"
-    printf '#!/bin/sh\necho "$GH_TOKEN"\n' > "$ASKPASS"; chmod 700 "$ASKPASS"
-    AUTH_URL="$(printf '%s' "$REPO_URL" | sed 's|https://|https://x-access-token@|')"
-    GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$REF" \
-      "$AUTH_URL" "$TMP/cli" >&2
+    if [ -n "${GH_TOKEN:-}" ]; then
+      ASKPASS="$TMP/.askpass"
+      printf '#!/bin/sh\necho "$GH_TOKEN"\n' > "$ASKPASS"; chmod 700 "$ASKPASS"
+      AUTH_URL="$(printf '%s' "$REPO_URL" | sed 's|https://|https://x-access-token@|')"
+      GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$REF" \
+        "$AUTH_URL" "$TMP/cli" >&2
+    else
+      git clone --depth 1 --branch "$REF" "$REPO_URL" "$TMP/cli" >&2
+    fi
     cd "$TMP/cli"; TGZ_PATH="./$(npm pack --silent | tail -1)"
     ;;
   release)
-    [ -n "${GH_TOKEN:-}" ] || { echo "需要 GH_TOKEN（只讀 token；private repo 必需）" >&2; exit 1; }
     VER="${REL_TAG#v}"
     ASSET="nine-ai-secret-broker-cli-${VER}.tgz"
     API="https://api.github.com/repos/${REPO_SLUG}"
-    AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" -H "User-Agent: broker-install")
-    echo "→ 取 pin 版 ${REL_TAG} 的 release metadata" >&2
-    REL_JSON="$(curl -fsSL --retry 3 -m 60 "${AUTH[@]}" -H "Accept: application/vnd.github+json" "$API/releases/tags/$REL_TAG")"
-    # 由 metadata 取 asset id（private repo 用 API asset URL 最穩；github.com/releases/download 會 404）
-    asset_id() {
-      printf '%s' "$REL_JSON" | node -e '
-        let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-          const j=JSON.parse(s); const name=process.argv[1];
-          const a=(j.assets||[]).find(x=>x.name===name);
-          if(!a){console.error("asset 唔存在: "+name);process.exit(1);}
-          process.stdout.write(String(a.id));
-        });' "$1"
-    }
-    echo "→ 下載 ${ASSET}" >&2
-    curl -fsSL --retry 3 -m 120 "${AUTH[@]}" -H "Accept: application/octet-stream" \
-      -o "$TMP/$ASSET" "$API/releases/assets/$(asset_id "$ASSET")"
-    curl -fsSL --retry 3 -m 60 "${AUTH[@]}" -H "Accept: application/octet-stream" \
-      -o "$TMP/$ASSET.sha256" "$API/releases/assets/$(asset_id "$ASSET.sha256")"
+    AUTH=(-H "X-GitHub-Api-Version: 2022-11-28" -H "User-Agent: broker-install")
+    [ -n "${GH_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer ${GH_TOKEN}" "${AUTH[@]}")
+    echo "→ 下載 pin 版 ${REL_TAG}（公開 repo，匿名下載）" >&2
+    # 公開 repo 直接走 releases/download；有 token（私有 fork／限流）才用 API asset URL
+    if [ -n "${GH_TOKEN:-}" ]; then
+      REL_JSON="$(curl -fsSL --retry 3 -m 60 "${AUTH[@]}" -H "Accept: application/vnd.github+json" "$API/releases/tags/$REL_TAG")"
+      asset_id() {
+        printf '%s' "$REL_JSON" | node -e '
+          let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+            const j=JSON.parse(s); const name=process.argv[1];
+            const a=(j.assets||[]).find(x=>x.name===name);
+            if(!a){console.error("asset 唔存在: "+name);process.exit(1);}
+            process.stdout.write(String(a.id));
+          });' "$1"
+      }
+      curl -fsSL --retry 3 -m 120 "${AUTH[@]}" -H "Accept: application/octet-stream" \
+        -o "$TMP/$ASSET" "$API/releases/assets/$(asset_id "$ASSET")"
+      curl -fsSL --retry 3 -m 60 "${AUTH[@]}" -H "Accept: application/octet-stream" \
+        -o "$TMP/$ASSET.sha256" "$API/releases/assets/$(asset_id "$ASSET.sha256")"
+    else
+      curl -fsSL --retry 3 -m 120 -o "$TMP/$ASSET" "$BASE_URL/$REL_TAG/$ASSET"
+      curl -fsSL --retry 3 -m 60 -o "$TMP/$ASSET.sha256" "$BASE_URL/$REL_TAG/$ASSET.sha256"
+    fi
     sha256_check "$TMP" "$ASSET" "$ASSET.sha256" || { echo "✖ checksum 唔符，已中止" >&2; exit 1; }
     echo "✔ checksum 通過：" >&2; cat "$TMP/$ASSET.sha256" >&2
     TGZ_PATH="$TMP/$ASSET"
