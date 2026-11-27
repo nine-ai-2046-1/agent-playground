@@ -99,40 +99,40 @@ jobs:
           sed -E 's/(ghs_[A-Za-z0-9]{6})[A-Za-z0-9]+/\1.../g' /tmp/claim.diag
           set -e
           test "$rc" = 0
-          python3 -c "
-import json
-d = json.load(open('/tmp/claim.json'))
-tok = (d.get('secrets', {}).get('github') or {}).get('value') or ''
-assert tok, d
-assert len(tok) >= 80, f'token 太短: {len(tok)}'
-print(f'claim OK: prefix={tok[:4]} len={len(tok)}')
-"
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/claim.json'))
+          tok = (d.get('secrets', {}).get('github') or {}).get('value') or ''
+          assert tok, d
+          assert len(tok) >= 80, f"token too short: {len(tok)}"
+          print(f"claim OK: prefix={tok[:4]} len={len(tok)}")
+          PY
 
       - name: 寫報告
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
-          python3 -c "
-import json, os, pathlib, datetime
-diag = None
-f = pathlib.Path('/tmp/claim.diag')
-if f.exists():
-    diag = f.read_text(errors='replace')[-1200:]
-rep = {
-  'at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-  'commit': os.environ.get('GITHUB_SHA'),
-  'runner': os.environ.get('RUNNER_NAME'),
-  'broker': os.environ.get('BROKER_URL'),
-  'agent': os.environ.get('BROKER_AGENT_ID'),
-  'hasKey': os.environ.get('HAS_KEY') == 'true',
-  'result': 'success' if os.environ.get('JOB_STATUS') == 'success' else 'failed',
-  'runUrl': os.environ.get('GITHUB_SERVER_URL') + '/' + os.environ.get('GITHUB_REPOSITORY') + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID'),
-  'diag': diag,
-}
-pathlib.Path('e2e-report.json').write_text(json.dumps(rep, ensure_ascii=False, indent=2) + chr(10))
-print(json.dumps(rep, ensure_ascii=False, indent=2))
-"
+          python3 - <<'PY'
+          import json, os, pathlib, datetime
+          diag = None
+          f = pathlib.Path('/tmp/claim.diag')
+          if f.exists():
+              diag = f.read_text(errors='replace')[-1200:]
+          rep = {
+              'at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'commit': os.environ.get('GITHUB_SHA'),
+              'runner': os.environ.get('RUNNER_NAME'),
+              'broker': os.environ.get('BROKER_URL'),
+              'agent': os.environ.get('BROKER_AGENT_ID'),
+              'hasKey': os.environ.get('HAS_KEY') == 'true',
+              'result': 'success' if os.environ.get('JOB_STATUS') == 'success' else 'failed',
+              'runUrl': os.environ.get('GITHUB_SERVER_URL') + '/' + os.environ.get('GITHUB_REPOSITORY') + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID'),
+              'diag': diag,
+          }
+          pathlib.Path('e2e-report.json').write_text(json.dumps(rep, ensure_ascii=False, indent=2) + "\n")
+          print(json.dumps(rep, ensure_ascii=False, indent=2))
+          PY
 
       - name: 提交報告（只 main，唔觸發下一輪）
         if: always() && github.ref == 'refs/heads/main'
