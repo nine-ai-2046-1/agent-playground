@@ -12,9 +12,9 @@
 | :-- | :-- |
 | 讀 repo 全部程式碼、文件、git 歷史 | 改生產 Worker、改 KV、改 secrets |
 | 本機起 `wrangler dev --local` 做攻擊測試 | 對生產 Workers 做掃描／壓力測試／fuzz |
-| 用自己嘅測試 agent id 在**本地** registry 玩 | 用 admin token 改生產 registry |
+| 用自己嘅測試 agent id 在**本地** registry 玩 | 改生產 registry（只有 Cloudflare 帳號持有人做得到） |
 | 提交 audit 報告、開 Linear issue、留 comment | 自行「順手修好」生產設定（要另開 issue 交 developer）|
-| 問 developer 要證據（log、版本、設定截圖）| 要求或持有 GitHub App PEM、admin token 值 |
+| 問 developer 要證據（log、版本、設定截圖）| 要求或持有 GitHub App PEM、Cloudflare API token |
 
 如果 audit 過程需要生產證據但你拿唔到，**記錄為「未證實」**，唔好用推論代替。
 
@@ -42,7 +42,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 ### 視角 B —「Challenge」：你認為應該審、但我們冇提到的
 
 你要自行產出：
-1. **Threat model**：攻擊者係邊幾類（本機被入侵的 agent、被 prompt injection 操縱的 agent、拿到 Cloudflare 帳號的人、拿到 admin token 的人、能改 repo 的人、網絡中間人、內部人）。
+1. **Threat model**：攻擊者係邊幾類（本機被入侵的 agent、被 prompt injection 操縱的 agent、拿到 Cloudflare 帳號的人、拿到 Cloudflare 帳號的人、能改 repo 的人、網絡中間人、內部人）。
 2. **攻擊面清單**：每個入口（CLI、Worker HTTP、KV、Cloudflare 帳號、GitHub App、安裝管道、文件本身）→ 可能攻擊 → 現有控制 → 缺口。
 3. **盲點清單**：我們文件冇講、但會影響安全嘅事（例如：多 agent 共用同一部機、Keychain 備份、CI 環境、log 保留、撤銷傳播時間）。
 4. 對每個你新提出嘅項目：**要麼給出可驗證測試，要麼明確標示「假設／推理，未實測」**。
@@ -85,10 +85,11 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | Nonce 重放保護 | `nonce:<agent>:<nonce>` TTL 120s | **先寫後派**，寫入失敗即拒絕 |
 | 防枚舉 | 未知 agent／錯簽名一律 `401` 空 body | 唔區分原因 |
 | entitlement 白名單 | `agent.entitlements` | 逐 key 檢查；`wants` 最多 12 項 |
-| Admin 認證 | `safeEqual()` 固定時間比較 `AGENT_TOKEN` + `AGENT_TOKEN_PREV` | 雙 token 零停機輪替；`actor` 記 `admin:current` / `admin:prev` |
-| Rate limit | `bumpRate()` 固定窗 KV | claim 40/min（agent+IP）、admin 60/min（IP）、audit 讀 30/min；超限 `429` + `Retry-After` |
+| 無 admin 面（N7） | Worker 只有 `/health` + `/v1/claim`；`/v1/agents*`、`/v1/secrets*`、`/v1/admin/*`、`/github-token` 全 404 | 共享 token 面完全消失；改資料只可以 Cloudflare 帳號層做（2FA） |
+| Rate limit | `bumpRate()` 固定窗 KV | claim 40/min（agent+IP）；超限 `429` + `Retry-After` |
 | 靜態 secret 信封加密 | `encryptSecret()` / `decryptSecret()` | AES-256-GCM、隨機 12B IV、AAD=`sec\|<agent>\|<name>`；KV 無明文；未設 key 寫入 503 |
-| 審計（D1） | `audit()` + `AUDIT_DB` | claim 同 admin 寫操作落 D1 `audit` 表；IP 只存 hash；`ctx.waitUntil`，失敗唔阻塞 |
+| 審計（D1） | `audit()` + `AUDIT_DB` | 每次 claim（成功／失敗／重放／限流）落 D1 `audit`；IP 只存 hash、`machine_id` 存呼叫端指紋；`ctx.waitUntil`，失敗 fail-open（只 console 記 `audit:write_failed`） |
+| last_used（N7） | claim 成功回寫 KV `agent:<id>` | `last_used_at` / `last_used_machine` / `last_used_ip` 供 housekeeping 判斷係咪冇人用 |
 | 最小回應 | mint token 只回 `token/expires_at/permissions` | 唔 spread GitHub 原始 response |
 | No-store | `finish()` 統一補 `Cache-Control: no-store` | 包括 plain-text 401/404（2026-11-27 修復後已全覆蓋；修前只有 JSON 回應有） |
 | 遮罩輸出 | CLI `maskValue()` | `sha256:xxxxxxxx len=N` |
@@ -97,7 +98,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | Secret 不入 repo | `.gitignore`（`.dev.vars`、`*.pem`、`*.base64.txt`）| 已掃過全 git 歷史：零 PEM／零 token 真值 |
 | 可重跑契約測試 | `worker/scripts/contract-test.mjs` | 30 項，自帶 mock KV + mock D1，無需 wrangler／網絡；CI 可直接跑 |
 | 安裝 pin + checksum | `scripts-bootstrap-install.sh` + Release `v0.4.0` | 默認抓 release tarball 並驗 `.sha256` + 版本核對；`--from-git` 為應急 |
-| argv 洩漏防線 | CLI 刻意唔接受 `--value`、`--admin-token` | secret 只經 stdin／env／Keychain |
+| argv 洩漏防線 | CLI 已冇任何寫入指令；secret 只經 stdin／env／Keychain | 密文由本機 `scripts/secret-envelope.mjs` 產生 |
 
 ---
 
@@ -111,7 +112,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | :-- | :-- | :-- | :-- | :-- | :-- |
 | R1 | **GitHub App PEM 的 blast radius** | installation `repository_selection = all` → token 可 push 帳號下 **82 個 repo**；PEM 洩漏 = 全部 repo 可被寫入 | 未收窄 | 收窄至 `agent-playground`；或分兩個 App（read / write）| 用 `github` token 打 `GET /installation/repositories` 數 `total_count`，並嘗試對其他 repo 做 read-only 請求 |
 | R2 | **Cloudflare 帳號／Worker code 完整性 = root of trust** | 能改 Worker 程式碼的人可加一條 dump endpoint 抽乾所有 secret；目前冇 CI 簽名、冇 branch protection、deploy 只靠本機 wrangler | 未設 | 開 2FA、API token 最小 scope + TTL、branch protection、deploy 憑證分離 | 檢查 repo 設定（`GET /branches/main/protection`，需 admin）；檢查 Cloudflare token scope |
-| R3 | **Admin token 單點（`AGENT_TOKEN`）** | 有佢＝可建 agent、grant entitlement，等同可側面取得任何 secret | **部分緩解（2026-11-27）**：已支援 `AGENT_TOKEN`+`AGENT_TOKEN_PREV` 雙 token 輪替、admin 限流 60/min、寫操作全落 audit。仍係共享 secret（未行簽名／mTLS） | admin 也改走 Ed25519 簽名；季度輪替並收緊 prev 生命週期 | 測試：只有 admin token 能否讀出 secret 值（經 PUT agent + claim 路徑）|
+| R3 | **Admin token 單點（`AGENT_TOKEN`）** | 有佢＝可建 agent、grant entitlement，等同可側面取得任何 secret | **已消除（2026-11-27 N7）**：admin API 全撤、`AGENT_TOKEN`／`AGENT_TOKEN_PREV`／`safeEqual` 從程式碼移除。改資料只可以 Cloudflare 帳號（2FA） | 部署後 `wrangler secret delete AGENT_TOKEN`（如仍在）；開 2FA + 最小 scope API token | 打 `/v1/agents`、`/v1/secrets/x/y`、`/v1/admin/audit`、`/github-token` 全部 404 |
 
 ### P1（顯著削弱縱深防禦）
 
@@ -120,7 +121,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | R4 | **靜態 secret 以原文存 KV** | **已修（N3）**：AES-256-GCM 信封加密，KV 只存 `{v,alg,iv,ct}`；未設 key fail closed 503；`reencrypt` 可遷移 legacy | 只剩 master key 單點問題（見 R15） |
 | R5 | **Nonce 檢查建在 KV（最終一致）** | 跨 region 傳播可達 ~60s，理論上可能擴大重放窗 | 改用 Durable Object 單點 |
 | R6 | **冇 rate limit／abuse 偵測** | **部分緩解（N2）**：claim 40/min per agent+IP、admin 60/min、audit 30/min，429 有 `Retry-After`。未做告警／異常偵測 | 加告警（429 突增、多 IP 同 agent）；KV 最終一致，跨 colo 可能超額 |
-| R7 | **Audit log 只有 `console.log`** | **已修（N4）**：claim + admin 寫操作落 D1 `audit` 表，可 `GET /v1/admin/audit` 或 SQL 查。仍未做告警／Logpush／append-only 保證（admin 可刪 D1） | 加 Logpush；D1 只留 Worker 寫權限 |
+| R7 | **Audit log 只有 `console.log`** | **已修（N4／N7）**：claim 落 D1 `audit`（加 `machine_id`），用 wrangler／SQL 查。仍未做告警／Logpush／append-only 保證 | 加 Logpush；D1 只留 Worker 寫權限 |
 | R8 | **Agent 自身可被騎劫（prompt injection）** | broker 保證「有權才拿到」，唔保證「拿到後唔漏」 | egress 白名單、log 掃描、secret 只在子進程 env |
 | R9 | **CLI 安裝管道跟 HEAD** | **已修（N5）**：默認安裝 Release `v0.4.0` tarball 並驗 `.sha256` + 版本；`--from-git` 只作應急 | 可再加 minisign／固定 digest 白名單 |
 
@@ -146,8 +147,8 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | O4 | 多 agent 同機隔離 | 未實測兩個 agent 在同一部機互相 claim 對方 key | 本機建兩個 agent，交叉 claim → 應 403 |
 | O5 | 換機／Keychain 遷移 | 未測 | 新機 `init` 新 id、或手動搬私鑰後 register |
 | O6 | Cloudflare KV 一致性對撤銷／重放的實際影響 | 只有理論 | 用兩個地理位置打同一 nonce／撤銷後即 claim |
-| O7 | **D1 audit 喺生產有冇真實寫入** | 表已建（remote migration 成功），但 deploy 後嘅 claim 未核對過 row | `wrangler d1 execute broker-audit --remote --command "SELECT count(*) FROM audit"`；或 `GET /v1/admin/audit` |
-| O8 | **Admin token 實際輪替未做過** | 程式支援雙 token，但 `AGENT_TOKEN_PREV` 尚未上載、未做過一次真輪替 | 設 prev + 換 current，用 `GET /v1/admin/audit` 睇 `actor=admin:prev` 有記錄後刪 prev |
+| O7 | **D1 audit 喺生產有冇真實寫入** | 已證實（N2+N4 批次實查 2 行 `kind=claim`）；N7 加 `machine_id` 後要再查一次 | `wrangler d1 execute broker-audit --remote --command "SELECT count(*) FROM audit"` |
+| O8 | ~~Admin token 輪替未做過~~ | **作廢（N7）**：admin token 已撤出架構，冇嘢可輪替 | 確認 Cloudflare secrets 內已無 `AGENT_TOKEN*` |
 
 ---
 
@@ -156,7 +157,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 **Phase 0 — 準備（15 分鐘）**
 1. `git log --oneline` 記錄受審版本（commit SHA）——報告要寫明「審的是邊個 SHA」。
 2. `broker --version`、`curl <worker>/health`、`npx wrangler secret list` 記錄環境事實。
-3. 確認自己有冇 admin token；冇就只做 agent 視角 + 本機測試。
+3. 確認自己有冇 Cloudflare 帳號權限（wrangler 已登入）；冇就只做 agent 視角 + 本機測試。
 
 **Phase 1 — 靜態審查（1–2 小時）**
 1. 逐行讀 `worker/src/index.js`，對照第 5 節「驗證順序」，搵偏離（例如檢查次序、錯誤訊息內容、log 欄位）。
@@ -170,7 +171,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 3. 每次測試後檢查 dev log：有冇 secret 值、有冇 stack trace 外露。
 
 **Phase 3 — 生產（只讀）**
-1. 只做 `GET /health`、`GET /v1/agents`（如有 admin token）。
+1. 只做 `GET /health` 同 `POST /v1/claim`（admin 端點應全部 404）。
 2. 若網絡允許，用**自己**的 agent 做一次 `claim`（唔好用他人 id），記錄完整 HTTP status。
 3. 唔好對生產做 fuzz／枚舉／壓測。
 
@@ -194,7 +195,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | T6 | 靜態 secret 正常 | 已存 key claim | 200 + 正確值 |
 | T7 | 撤銷 | `DELETE /v1/agents/:id` 後 claim | 401 |
 | T8 | 管理 API 無 token | `curl /v1/agents` 無 header | 401 |
-| T9 | Admin 認證時序 | 用非常短/長 token 打 admin | 全部 401，無時間差洩漏（可用 1000 次平均比較）|
+| T9 | Admin 面已消失 | 打 `/v1/agents`、`/v1/secrets/a/b`、`/v1/admin/audit`、`/github-token` | 全部 404，body 唔提任何內部路徑 |
 | T10 | 枚舉防護 | 用 20 個不存在 id 打 claim | 全部 401 且 body 一致、無差異 |
 | T11 | Log 洩漏 | 跑完所有測試後 grep dev log | 無 `ghs_`、無 secret 值、無 PEM |
 | T12 | GitHub token 範圍 | `curl -H "Authorization: Bearer $GH_TOKEN" /installation/repositories` | 檢查 `total_count` 是否符合預期收窄 |
@@ -270,7 +271,7 @@ audit/<YYYY-MM-DD>/
 | # | audit 發現 | 修法 | 驗證 |
 | :-- | :-- | :-- | :-- |
 | F1 | 退出碼契約混亂（缺參數→1、無指令→0） | 新增 `usageDie()`：用法類錯誤一律 exit 2；無指令呼叫亦 exit 2 | 實測：無參 2、`init` 缺 `--agent` 2、未知指令 2 |
-| F2 | `--admin-token`／`secret-put --value` 令 token 走 argv | 兩者移除；admin token 只讀 env／Keychain；secret 只讀 stdin | `grep admin-token dist/index.js` 只剩註解／help 文字；`--admin-token` 不再被解析 |
+| F2 | `--admin-token`／`secret-put --value` 令 token 走 argv | 相關指令連同 token 概念一併刪除；secret 只經 stdin | `grep -i "admin-token\|secret-put" dist/index.js` 只餘「已撤出」提示 |
 | F3 | plain-text 401/404 無 `Cache-Control: no-store` | `finish()` 統一補 header | 契約測試第 16 項：200/401/404/400 全部有 no-store |
 | F4 | 舊 `/github-token` 仍可 mint 全範圍 token | 默認 404；opt-in 需 `LEGACY_BEARER_ENABLED=true` + `LEGACY_REPOSITORIES` allowlist，缺則 403；mint 帶 repositories | 契約測試第 14/15 項 |
 | F5 | 契約測試腳本未入 repo | 新增 `worker/scripts/contract-test.mjs`（16 項、mock KV） | `node worker/scripts/contract-test.mjs` → 16/16 PASS |
@@ -284,8 +285,8 @@ audit/<YYYY-MM-DD>/
 | # | 項目 | 為何未修 | 下一步 |
 | :-- | :-- | :-- | :-- |
 | N1 | GitHub App installation = all（82 repo） | **用戶 2026-11-27 決定：唔改，接受風險**（已知 installation token 可及 82 repo；改動需 App 設定頁） | 已記錄為 accepted risk，不再跟進 |
-| N2 | Admin token 單點、無 rotation／rate limit | 屬設計改動（S10 級） | 建議下一步：admin 也走 Ed25519 + 雙 token 輪替 |
-| N3 | 靜態 secret 原文存 KV | ✅ **已修（2026-11-27）**：AES-256-GCM 信封加密（AAD 綁 agent+name），KV 只存 `{v,alg,iv,ct}`；未設 key 寫入 503（fail closed）；舊明文可讀 + `POST /v1/admin/reencrypt` 遷移；契約測試 20/20 | 生產 `BROKER_MASTER_KEY` 已上（worker `540987ca`） |
+| N2 | Admin token 單點、無 rotation／rate limit | ✅ **已消除（N7）**：admin API 全撤、共享 token 刪除、claim 限流保留 | 部署後確認 `/v1/admin/*` 404、secrets 內無 `AGENT_TOKEN*` |
+| N3 | 靜態 secret 原文存 KV | ✅ **已修（2026-11-27）**：AES-256-GCM 信封加密（AAD 綁 agent+name），KV 只存 `{v,alg,iv,ct}`；未設 key 寫入 503（fail closed）；舊明文可讀；遷移改用 `scripts/secret-envelope.mjs`；契約測試 22/22 | 生產 `BROKER_MASTER_KEY` 已上（worker `540987ca`） |
 | N4 | audit log 只 console.log | 需 D1／R2 或 Logpush | Roadmap 第 6 項 |
 | N5 | CLI 安裝仍可跟 HEAD | ✅ **已修（2026-11-27）**：`scripts-bootstrap-install.sh` 預設走 release `v0.4.0` tarball，下載 `.sha256` 驗證後才 `npm i -g`，並核對 `broker --version` 同 tag 一致；`--from-git` 只在應急用；CI 每次跑都實測 release 安裝路徑 | 實測：private repo 嘅 `releases/download` URL 回 404，已改 API asset URL |
 | N6 | 本機殘留 `.dev.vars`／`~/Downloads/*.pem` | ✅ **已完成（2026-11-27）**：App PEM（原 644）已搬去 `~/Doubao/secrets/baobao2046.app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；`.dev.vars` 600 只留本機 dev 用 | master key 亦存 `~/Doubao/secrets/broker-master-key.b64`（600） |
@@ -316,7 +317,7 @@ audit/<YYYY-MM-DD>/
 | :-- | :-- | :-- |
 | L-1 | 單 key 全失敗回 **500**（`github_not_configured` 實為設定缺失） | 改 503，令 CLI／上層可分辨「設定缺失」vs「真故障」 |
 | L-2 | `claim --print` 輸出係 JSON（同 `--json` 幾乎相同），非純值 | 文件寫清或改純值 |
-| L-3 | 非 macOS 冇 `admin-login` 持久化（每次要 export `BROKER_ADMIN_TOKEN`） | 可加 `~/.config/secret-broker/admin.token`（600） |
+| L-3 | ~~非 macOS `admin-login` 持久化~~ | **作廢（N7）**：`admin-login` 已刪 |
 
 **仍未做的環境**：Lima VM 未安裝（本機冇 `limactl`；OrbStack daemon 未起）。雲主機已提供乾淨 Linux，故未重複搭建。
 
@@ -346,4 +347,4 @@ run `45977991426`（commit `2d8c02d`）**success**；報告 `e2e-report.json` �
 | 撤銷該 token | GitHub 無公開撤銷 installation token 端點（`DELETE /installation/tokens` 以 installation token／App JWT 皆 404）；該 token 於 `2026-11-27T10:53:51Z` 到期，實測 `401` 已失效 |
 | 防止再犯 | workflow 改為只輸出 `prefix`／`len`／`expires_at`，token 明文只寫 `/tmp/claim.json` 並即時 `rm`，永不入 log／報告 |
 
-**結論**：NIN-183「生產 E2E 做唔到」嘅阻塞已解除（唔再依賴本機／雲機出口）。仍未做：`github_not_configured` 應回 503（L-1）、`claim --print` 語意（L-2）、非 macOS `admin-login` 持久化（L-3）、N2–N6。
+**結論**：NIN-183「生產 E2E 做唔到」嘅阻塞已解除（唔再依賴本機／雲機出口）。仍未做：`github_not_configured` 應回 503（L-1）、`claim --print` 語意（L-2）。N2–N6 已完成，N7 已落地（待部署）。

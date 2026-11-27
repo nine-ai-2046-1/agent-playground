@@ -78,15 +78,15 @@ broker whoami
 # 1. 建立 agent 身份（生成 Ed25519 keypair；macOS 入 Keychain，Linux 寫 ~/.config/secret-broker/keys/*.pkcs8 600）
 broker init --agent opencode-01
 
-# 2. 登記（admin 權限；公鑰自動由本機私鑰推導，唔需要抄）
-broker admin-login --token-stdin              # 由 stdin 讀 admin token
-broker register --agent opencode-01 \
+# 2. 登記（喺 Cloudflare 帳號層做；CLI 只負責印出要寫入嘅 JSON）
+broker ask-register --agent opencode-01 \
   --entitlements github \
   --installation-id 185701417 \
   --repositories agent-playground
+# → 跟住喺 Cloudflare KV 寫入 agent:opencode-01（指令會印埋出嚟）
 
-# 3. 加靜態 secret（--grant 會自動加 entitlement）
-printf '%s' 'p@ssword' | broker secret-put --agent opencode-01 --name smtp.password --grant
+# 3. 加靜態 secret（本機加密，只出密文）
+printf '%s' 'p@ssword' | node scripts/secret-envelope.mjs --agent opencode-01 --name smtp.password
 
 # 4. 用
 broker claim github            # 遮罩摘要（sha256 前 8 位 + 長度 + 到期）
@@ -102,16 +102,15 @@ broker exec --keys smtp.password -- sh -c 'echo ${#SMTP_PASSWORD}'
 | `broker init --agent <id>` | 生成 keypair、寫 config、印公鑰 |
 | `broker whoami` | 顯示本機 agent / broker / 有冇私鑰 |
 | `broker health` | 檢查 broker 可達性（`/health`） |
-| `broker pubkey` | 由私鑰推導公鑰（register 用，唔需要抄） |
+| `broker pubkey` | 由私鑰推導公鑰（貼上 Cloudflare 用，唔需要抄） |
+| `broker ask-register` | 印出要人手寫入 Cloudflare KV 嘅 agent JSON |
 | `broker claim [key…] [--print\|--env\|--json]` | 簽名 claim；預設遮罩 |
 | `broker exec [--keys a,b] -- <cmd…>` | claim 後注入環境變數執行（推薦） |
-| `broker rotate` | 換 keypair（register 新公鑰後生效） |
-| `broker register / agents / secret-put` | admin：登記公鑰、列 registry、存靜態 secret |
-| `broker admin-login --token-stdin` | admin token 入 Keychain |
+| `broker rotate` | 換 keypair（舊公鑰即刻失效；新公鑰要喺 Cloudflare 更新） |
 | `broker version \| --version \| -v` | 印版本 |
 | `broker help \| --help \| -h` | 印說明（含文件索引、退出碼） |
 
-環境變數：`BROKER_URL`（覆蓋 broker 網址）、`BROKER_AGENT_ID`（預設 agent）、`BROKER_ADMIN_TOKEN`（admin）。
+環境變數：`BROKER_URL`（覆蓋 broker 網址）、`BROKER_AGENT_ID`（預設 agent）、`BROKER_PRIVATE_KEY`（CI／容器用私鑰）。
 環境變數優先於 `~/.config/secret-broker/config.json`。
 
 CLI 退出碼：`0` 成功、`1` 執行錯誤、`2` 用法錯誤（包括冇打指令、缺參數、agent id 格式錯）；claim 專用 `3` 401、`4` 403、`5` 404、`6` 409。
@@ -152,29 +151,48 @@ secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其�
 | 未在 `entitlements` | `403 not_entitled`（列出 `denied`） |
 | 超過限流（默認 40 次／分鐘／agent+IP） | `429 rate_limited` + `Retry-After`、`retry_after` |
 
-### 管理 API（`Authorization: Bearer <admin token>`）
+### 註冊與管理（**Cloudflare 帳號層，唔經 Worker**）
 
-| Method / Path | 作用 |
-| :-- | :-- |
-| `PUT /v1/agents/:id` | 登記 / 輪替公鑰（`pubkey`, `entitlements`, `github{installation_id,repositories,permissions}`） |
-| `GET /v1/agents` | 列 registry（公鑰只露前 12 字元） |
-| `GET /v1/agents/:id` | 單筆全值（供輪替／加 entitlement） |
-| `DELETE /v1/agents/:id` | 撤銷 agent |
-| `PUT /v1/secrets/:agentId/:name` | 存靜態 secret（`{"value":"…"}`）；**落 KV 前自動信封加密** |
-| `DELETE /v1/secrets/:agentId/:name` | 刪靜態 secret |
-| `POST /v1/admin/reencrypt` | 把舊明文 `sec:*` 就地遷移成密文（回 `{migrated, already_encrypted, failed}`） |
-| `GET /v1/admin/audit?limit=50&kind=claim\|admin` | 讀 D1 審計記錄（預設 50，最多 200） |
+Worker **冇任何 admin API**：`/v1/agents`、`/v1/secrets`、`/v1/admin/*` 全部 404。registry 同 secret 只可以由 Cloudflare 帳號持有人寫入 —— 所以 CLI 原始碼可以公開派，因為佢冇能力改任何伺服器資料。
 
-### 舊相容 endpoint（默認已下架）
-
-`POST /github-token`（Bearer `AGENT_TOKEN`）默認回 `404`。只做回歸測試時才開：
+**① 新 agent 註冊**
 
 ```bash
-npx wrangler secret put LEGACY_BEARER_ENABLED   # 值 "true"
-npx wrangler secret put LEGACY_REPOSITORIES     # 例：agent-playground（必填）
+broker init --agent opencode-01                          # 本機生成 keypair
+broker ask-register --agent opencode-01                                   # 印出完整 agent JSON + wrangler 指令
 ```
 
-冇 `LEGACY_REPOSITORIES` 時回 `403 legacy_repo_allowlist_missing`，避免 mint 出全 installation 範圍的 token。
+跟住喺 Cloudflare 做（Dashboard → Workers KV → `BROKER_KV` → 新增 key，或者）：
+
+```bash
+cd worker
+npx wrangler kv key put --binding=BROKER_KV --remote "agent:opencode-01" '<上面印出嘅 JSON>'
+```
+
+**② 加靜態 secret（值只喺你部機加密）**
+
+```bash
+printf 'my-smtp-password' | node scripts/secret-envelope.mjs --agent opencode-01 --name smtp.password
+# 會印出密文信封 + 一行 wrangler kv key put
+```
+
+**③ 改 entitlement / 公鑰 / 停用**
+
+直接改 `agent:<id>` 嘅 JSON（`entitlements`、`pubkey`、`status:"disabled"`）。
+
+**④ 撤銷（刪除）**
+
+`wrangler kv key delete --binding=BROKER_KV --remote "agent:<id>"` 或 Dashboard 刪 key。**CLI 冇 delete 指令，Worker 亦冇 DELETE 端點** —— 刻意令「消滅一個身分」只能由雲帳號做。
+
+| 資料 | KV key | 邊個寫 |
+| :-- | :-- | :-- |
+| agent 記錄 | `agent:<id>` | Cloudflare 帳號 |
+| 靜態 secret（密文信封） | `sec:<agent>:<name>` | 本機加密 → Cloudflare 帳號 |
+| nonce / 限流計數 | `nonce:*` / `rl:*` | Worker（自動，TTL 過期） |
+
+### 舊 endpoint 已完全下架
+
+`POST /github-token` 同所有 admin 路徑一樣回 **404**，程式碼已移除（唔再靠 flag 開關）。
 
 ## KV 結構（`BROKER_KV`）
 
@@ -191,8 +209,6 @@ npx wrangler secret put LEGACY_REPOSITORIES     # 例：agent-playground（必�
 | 桶 | 默認 | 覆寫 secret | key |
 | :-- | :-- | :-- | :-- |
 | claim | 40/min | `CLAIM_RATE_LIMIT` | agent + IP |
-| admin 寫入 | 60/min | `ADMIN_RATE_LIMIT` | IP |
-| audit 讀取 | 30/min | `AUDIT_RATE_LIMIT` | IP |
 
 ```bash
 wrangler secret put CLAIM_RATE_LIMIT   # 例：20
@@ -200,40 +216,34 @@ wrangler secret put CLAIM_RATE_LIMIT   # 例：20
 
 > 限流係 best-effort：KV 最終一致，多 colo 之間可能有少量超額，用嚟擋失控 loop，唔係 DDoS 防護（邊緣層仍建議 Access／WAF）。
 
-## Admin token 輪替（N2）
+## 為何冇 admin API（2026-11-27 定案）
 
-Worker 同時接受 `AGENT_TOKEN`（current）與 `AGENT_TOKEN_PREV`（舊）。零停機流程：
-
-```bash
-# 1. 舊 token 降為 prev（此時兩條都通）
-wrangler secret put AGENT_TOKEN_PREV   # 貼入現用 token
-
-# 2. 換新 current
-node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))' > ~/Doubao/secrets/broker-admin-token
-wrangler secret put AGENT_TOKEN < ~/Doubao/secrets/broker-admin-token
-
-# 3. 全客戶端換完（建議觀察 24h）後，刪 prev
-wrangler secret delete AGENT_TOKEN_PREV
-```
-
-`GET /v1/admin/audit` 的 `actor` 會寫 `admin:current` / `admin:prev`，可直接睇邊個仲用舊 token。
+| 原因 | 說明 |
+| :-- | :-- |
+| 收窄攻擊面 | 少一套可被暴力猜測／重放嘅共享 token；Worker 只剩 `/health` + `/v1/claim` |
+| 單一 root of trust | 改資料 = Cloudflare 帳號（開 2FA 之後只有你做到），CLI／source 派街坊都冇所謂 |
+| 無「靜默接管」 | 冇 PUT 端點就冇得覆蓋別人公鑰；要換 key 就要喺 Cloudflare 手動改，一定有紀錄 |
+| 無 delete 面 | 撤銷只可以喺雲帳號做，冇任何 client 可以單方面刪身分 |
 
 ## 審計（N4）
 
-每次 claim 同每次 admin 寫操作（agent put/delete、secret put/delete、reencrypt）都會寫：
+每次 claim（成功／失敗、包括重放同限流）都會寫。**離線指令（`init`／`whoami`／`ask-register`／`rotate`）完全唔上網，所以冇 log** —— 呢個設計刻意：只關注「邊個用過 broker、邊個試圖入侵」。
 
 | 去邊 | 內容 |
 | :-- | :-- |
 | Cloudflare log（console JSON） | 全量，供 `wrangler tail` / Logpush |
-| D1 `broker-audit.audit` | `id, ts(ISO8601), kind, agent_id, actor, action, wants, result, status, ip_hash, ua, latency_ms, details` |
+| D1 `broker-audit.audit` | `id, ts, kind, agent_id, actor, action, wants, result, status, ip_hash, ua, latency_ms, details, machine_id` |
 
 設計約束：
 
 - **永不記 secret 值**（只記 name / 長度 / 結果）
+- `machine_id` = 呼叫端 `X-Broker-Machine`（IOPlatformUUID→SHA-256 前 16 hex，唔含原始硬體 ID）；缺／格式錯記 `-`
+- 成功 claim 會同時更新 KV `agent:<id>` 嘅 `last_used_at`／`last_used_machine`／`last_used_ip`，用嚟 housekeeping
 - IP 只存 `SHA-256(CF-Connecting-IP)` 前 16 hex，唔存原文
 - 寫入用 `ctx.waitUntil`，D1 掛咗都唔會拖死 claim（只記 `audit:write_failed` 落 console）
-- 查：`GET /v1/admin/audit?limit=50` 或
-  `wrangler d1 execute broker-audit --remote --command "SELECT ts,kind,action,agent_id,result,status FROM audit ORDER BY id DESC LIMIT 20"`
+- **成功派發會更新 `agent:<id>.last_used_at` / `last_used_machine`**（housekeeping 用：超過 N 日冇用就考慮刪）
+- 查（Cloudflare 帳號層，冇 HTTP 讀取端點）：
+  `wrangler d1 execute broker-audit --remote --command "SELECT ts,agent_id,result,status,ip_hash,machine_id FROM audit ORDER BY id DESC LIMIT 20"`
 
 ## 靜態 secret 加密（N3）
 
@@ -245,7 +255,7 @@ Worker 收到 `PUT /v1/secrets/:agent/:name` 後**即刻用 AES-256-GCM 加密**
 | 金鑰 | `BROKER_MASTER_KEY`（Worker secret，base64url 32 bytes） |
 | AAD | `sec|<agent>|<name>` — 搬 key／改 agent 名會解密失敗（防調包） |
 | KV 內 | `{"v":1,"alg":"A256GCM","iv":"…","ct":"…"}` — 無明文、無 metadata |
-| 舊資料 | 讀到非信封格式即當 legacy 明文（向後兼容），`POST /v1/admin/reencrypt` 可就地遷移 |
+| 舊資料 | 讀到非信封格式即當 legacy 明文（向後兼容）；要遷移就用 `scripts/secret-envelope.mjs` 重新加密再覆寫該 KV key |
 | 未設 key | 寫入回 **503 `encryption_not_configured`**（fail closed，唔會偷偷存明文） |
 
 ```bash
@@ -253,8 +263,8 @@ Worker 收到 `PUT /v1/secrets/:agent/:name` 後**即刻用 AES-256-GCM 加密**
 node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))' > ~/Doubao/secrets/broker-master-key.b64
 wrangler secret put BROKER_MASTER_KEY < ~/Doubao/secrets/broker-master-key.b64
 
-# 遷移舊明文（admin token 必備）
-curl -X POST "$BROKER_URL/v1/admin/reencrypt" -H "Authorization: Bearer $BROKER_ADMIN_TOKEN"
+# 舊明文遷移：本機重新加密後覆寫
+printf '%s' "$OLD_VALUE" | node scripts/secret-envelope.mjs --agent <id> --name <key>
 ```
 
 ## CI 驗證（生產 E2E）
@@ -274,7 +284,7 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 ## 已知限制
 
 1. **Cloudflare Access 未開**：Zero Trust Free 要綁信用卡（$0 但要授權超額收費），所以邊緣層未有 Access Service Token；現時保護全靠 Worker 內簽名驗證。
-2. 公鑰 registry 靠 admin token 寫入（只作登記／管理用，唔參與每次 claim）。已支援雙 token 重疊輪替（見上節），但實務上仍係共享 secret：建議每季度輪替一次並收緊 `AGENT_TOKEN_PREV` 生命週期。
+2. registry 只可以由 Cloudflare 帳號寫入（已冇 admin API）。**Cloudflare 帳號 = 唯一 root of trust**：請務必開 2FA、用最小權限 API token。
 3. **Master key 單點**：`BROKER_MASTER_KEY` 只存喺 Worker secret 同本機 `~/Doubao/secrets/broker-master-key.b64`（600）。遺失即解唔到舊 secret（要重新 `secret-put`）；輪替要保留舊 key 做解密（kid 欄位已預留但未多 key）。
 4. `wants` 最多 12 項，`repositories` 最多 20 個。
 5. 舊 bearer endpoint 仍然存在，文件齊備後應下架。
@@ -293,4 +303,4 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 | `agents/TECH.md` | 接手的 developer agent | 架構、API 契約、KV 模型、部署／發版／測試 playbook、已知陷阱 |
 | `agents/AUDIT.md` | audit agent | 宣稱清單、控制清單、風險登記冊（P0–P2）、audit playbook、測試案例、證據要求 |
 
-審核基線（2026-11-27 N2+N4 後）：Worker 版本 `207a66f2`、CLI `0.4.0`、契約測試 30/30、D1 `broker-audit` 已上線、生產 registry 有 `opencode-01` + `ci-e2e-01`、Access 未開。
+審核基線（2026-11-27 N7 後）：Worker 只暴露 `/health` + `/v1/claim`，admin API 全撤；契約測試 22/22；D1 `broker-audit` 有 `machine_id` 欄；Access 未開。

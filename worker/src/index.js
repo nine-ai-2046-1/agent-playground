@@ -1,14 +1,20 @@
 // github-token-broker — Cloudflare Worker
 //
-// 兩個世代並存：
-//   (A) 舊：POST /github-token  — Bearer AGENT_TOKEN（保留做回歸測試 V1/V2）
-//   (B) 新：POST /v1/claim      — 每個 agent 一對 Ed25519 密鑰，驗簽後按 entitlement 派 secret
+// github-token-broker — Cloudflare Worker
 //
-// 原則：
+// 單一對外介面：
+//   GET  /health      — 公開健康檢查（只回布林旗標）
+//   POST /v1/claim    — 每個 agent 一對 Ed25519 密鑰，驗簽後按 entitlement 派 secret
+//
+// 設計原則（2026-11-27 定案）：
+//   - **冇 admin API**。registry（agent:*）同靜態 secret（sec:*）只可以由 Cloudflare
+//     Dashboard／wrangler 用帳號登入寫入；Worker 本身冇任何「可以改資料」嘅端點。
+//     即係 Cloudflare 帳號 = 唯一 root of trust，CLI 原始碼可以公開發佈。
+//   - 冇共享 admin token、冇 DELETE 端點：撤銷／刪除一律人手喺 Cloudflare 做。
 //   - PEM 只在記憶體出現幾秒；不回傳、不 log、不寫入任何 response。
-//   - 簽名驗證失敗／重放／無 entitlement → 一律唔派 secret，錯誤訊息唔含內部細節。
-//   - 每次 claim 寫一行 audit log（agent_id / 要求清單 / 結果），唔含 secret 值；有 AUDIT_DB 就同時入 D1。
-//   - N2：admin 支援 current + prev 雙 token 重疊輪替；claim／admin 均有 KV 固定窗限流。
+//   - 每次 claim（成功或失敗）寫一行 audit（agent_id / wants / 結果 / ip_hash /
+//     machine_id / ua / latency），唔含 secret 值；有 AUDIT_DB 就同時入 D1。
+//   - 成功派發即更新 agent 記錄嘅 last_used_at（housekeeping 用）。
 
 const GITHUB_API = "https://api.github.com";
 const JWT_TTL_SECONDS = 10 * 60; // GitHub 上限 10 分鐘
@@ -153,15 +159,6 @@ async function createAppJwt(appId, pemBase64) {
   return `${unsigned}.${toBase64Url(signature)}`;
 }
 
-/** 長度先比、再逐字 XOR，避免早期返回造成的時序差異 */
-function safeEqual(a, b) {
-  if (typeof a !== "string" || typeof b !== "string") return false;
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
 /** 截短 + 遮罩，確保對外錯誤訊息永遠唔含 JWT / token / PEM */
 function sanitizeDetail(text) {
   return String(text ?? "")
@@ -269,10 +266,16 @@ async function resolveSecret(env, agentId, name, agent) {
 /** ====== audit log（console + D1）====== */
 
 const AUDIT_INSERT_SQL =
-  "INSERT INTO audit (ts,kind,agent_id,actor,action,wants,result,status,ip_hash,ua,latency_ms,details) " +
-  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)";
+  "INSERT INTO audit (ts,kind,agent_id,actor,action,wants,result,status,ip_hash,ua,latency_ms,details,machine_id) " +
+  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
 /** IP 只存 SHA-256 前 16 hex，唔留原文（隱私 + 仍可追同源） */
+/** CLI 送嚟嘅機械指紋（CLI 已哈希成 16 hex）；唔合格式即當無，唔信任何其他值 */
+function machineId(request) {
+  const raw = (request.headers && request.headers.get("X-Broker-Machine")) || "";
+  return /^[0-9a-f]{8,32}$/.test(raw) ? raw : null;
+}
+
 async function hashIp(ip) {
   if (!ip) return null;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(ip)));
@@ -289,6 +292,8 @@ async function hashIp(ip) {
  */
 function audit(request, env, ctx, fields) {
   const ip = request.headers.get("CF-Connecting-IP") || null;
+  // CLI 送上嚟嘅機械指紋（已由 CLI 哈希成 16 hex，Worker 唔知原值）；唔合格式即當無
+  const machine = machineId(request);
   const ua = (request.headers.get("User-Agent") || "").slice(0, 120);
   const row = {
     ts: new Date().toISOString(),
@@ -302,6 +307,7 @@ function audit(request, env, ctx, fields) {
     ua,
     latency_ms: fields.latency_ms ?? null,
     details: fields.details ?? null,
+    machine_id: machine,
   };
 
   const write = (async () => {
@@ -326,6 +332,7 @@ function audit(request, env, ctx, fields) {
           row.ua,
           row.latency_ms,
           row.details ? JSON.stringify(row.details) : null,
+          row.machine_id,
         )
         .run();
     } catch (error) {
@@ -338,36 +345,14 @@ function audit(request, env, ctx, fields) {
   return write;
 }
 
-/** ====== N2：admin token 輪替（current + prev 重疊期）====== */
-
-function adminTokens(env) {
-  const list = [];
-  if (env.AGENT_TOKEN) list.push({ token: String(env.AGENT_TOKEN), actor: "admin:current" });
-  if (env.AGENT_TOKEN_PREV) list.push({ token: String(env.AGENT_TOKEN_PREV), actor: "admin:prev" });
-  return list;
-}
-
-/** 由 Authorization header 找出匹配嘅 admin token；唔匹配回 null */
-function adminAuth(request, env) {
-  const header = request.headers.get("Authorization") || "";
-  const provided = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (!provided) return null;
-  for (const entry of adminTokens(env)) {
-    if (safeEqual(provided, entry.token)) return entry;
-  }
-  return null;
-}
-
 /** ====== 限流（KV 固定窗；best effort，非硬保證）====== */
 
 const RATE = {
-  claim: { limit: 40, window: 60 }, // 每 agent 每分鐘
-  admin: { limit: 60, window: 60 }, // 每 IP 每分鐘
-  auditRead: { limit: 30, window: 60 },
+  claim: { limit: 40, window: 60 }, // 每 agent + IP 每分鐘
 };
 
 function rateConf(env, scope) {
-  const keyMap = { claim: "CLAIM_RATE_LIMIT", admin: "ADMIN_RATE_LIMIT", auditRead: "AUDIT_RATE_LIMIT" };
+  const keyMap = { claim: "CLAIM_RATE_LIMIT" };
   const base = RATE[scope];
   const override = Number(env[keyMap[scope]]);
   return { ...base, limit: Number.isFinite(override) && override > 0 ? override : base.limit };
@@ -536,6 +521,15 @@ export default {
         }
       }
 
+      // N7：housekeeping 用 —— 成功派發即更新 last_used_at / last_used_machine
+      const touched = {
+        ...agent,
+        last_used_at: new Date().toISOString(),
+        last_used_machine: machineId(request),
+        last_used_ip: await hashIp(request.headers.get("CF-Connecting-IP") || null),
+      };
+      ctx.waitUntil(env.BROKER_KV.put(`agent:${agentId}`, JSON.stringify(touched)));
+
       audit(request, env, ctx, {
         agent_id: agentId,
         wants,
@@ -567,241 +561,10 @@ export default {
       );
     }
 
-    /* ===================== 管理 API（Bearer admin token；N2：current + prev 輪替）===================== */
-    const adminPaths =
-      url.pathname.startsWith("/v1/agents") ||
-      url.pathname.startsWith("/v1/secrets") ||
-      url.pathname.startsWith("/v1/admin");
-    if (adminPaths) {
-      if (adminTokens(env).length === 0) return finish(json({ error: "broker misconfigured" }, 500));
-      if (!env.BROKER_KV) return finish(json({ error: "broker misconfigured" }, 500));
-
-      // 限流：每 IP 每分鐘（防止 token 猜測／狂掃 registry）
-      const ipSubject = request.headers.get("CF-Connecting-IP") || "unknown";
-      const adminRl = await bumpRate(env, "admin", ipSubject);
-      if (!adminRl.allowed) {
-        audit(request, env, ctx, {
-          kind: "admin",
-          action: "rate_limited",
-          result: "rate_limited",
-          status: 429,
-          details: { path: url.pathname },
-        });
-        const res = json({ error: "rate_limited", retry_after: adminRl.retryAfter }, 429);
-        res.headers.set("Retry-After", String(adminRl.retryAfter));
-        return finish(res);
-      }
-
-      const auth = adminAuth(request, env);
-      if (!auth) {
-        audit(request, env, ctx, {
-          kind: "admin",
-          action: "auth_failed",
-          result: "unauthorized",
-          status: 401,
-          details: { path: url.pathname },
-        });
-        return finish(new Response("Unauthorized", { status: 401 }));
-      }
-
-      const parts = url.pathname.split("/").filter(Boolean); // ["v1","agents","id"]
-
-      // N4：每個「會改狀態」嘅 admin 操作都落 audit（actor 標明用 current 定 prev token）
-      const adminDone = (response, action, extra = {}) => {
-        audit(request, env, ctx, {
-          kind: "admin",
-          actor: auth.actor,
-          action,
-          result: response.status < 400 ? "ok" : "failed",
-          status: response.status,
-          latency_ms: Date.now() - startedAt,
-          details: { ...extra, path: url.pathname },
-        });
-        return finish(response);
-      };
-
-      // GET /v1/agents
-      if (parts[1] === "agents" && parts.length === 2 && request.method === "GET") {
-        const list = await env.BROKER_KV.list({ prefix: "agent:" });
-        const agents = [];
-        for (const k of list.keys) {
-          const rec = await env.BROKER_KV.get(k.name, "json");
-          if (rec) {
-            agents.push({
-              id: rec.id,
-              status: rec.status,
-              pubkey: String(rec.pubkey || "").slice(0, 12) + "…",
-              entitlements: rec.entitlements || [],
-              created_at: rec.created_at,
-            });
-          }
-        }
-        return finish(json({ agents }, 200));
-      }
-
-      // GET /v1/agents/:id  （admin：連 pubkey 全值，做輪替／加 entitlement 用）
-      if (parts[1] === "agents" && parts.length === 3 && request.method === "GET") {
-        const rec = await getAgent(env, parts[2]);
-        if (!rec) return finish(json({ error: "not_found" }, 404));
-        return finish(json({ agent: rec }, 200));
-      }
-
-      // PUT /v1/agents/:id   （註冊／輪替公鑰）
-      if (parts[1] === "agents" && parts.length === 3 && request.method === "PUT") {
-        const id = parts[2];
-        if (!AGENT_ID_RE.test(id)) return finish(json({ error: "invalid_agent_id" }, 400));
-        const body = await request.json().catch(() => null);
-        if (!body || typeof body !== "object") return finish(json({ error: "invalid_body" }, 400));
-        if (!body.pubkey) return finish(json({ error: "missing_pubkey" }, 400));
-
-        const existing = await getAgent(env, id);
-        const record = {
-          id,
-          pubkey: String(body.pubkey),
-          status: body.status === "disabled" ? "disabled" : "active",
-          entitlements: Array.isArray(body.entitlements) ? body.entitlements.map(String) : [],
-          github: body.github && typeof body.github === "object" ? body.github : existing?.github || null,
-          created_at: existing?.created_at || new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
-        await env.BROKER_KV.put(`agent:${id}`, JSON.stringify(record));
-        return adminDone(json({ agent: { ...record, pubkey: record.pubkey.slice(0, 12) + "…" } }, 201), "agent_put", { agent_id: id });
-      }
-
-      // DELETE /v1/agents/:id
-      if (parts[1] === "agents" && parts.length === 3 && request.method === "DELETE") {
-        await env.BROKER_KV.delete(`agent:${parts[2]}`);
-        return adminDone(json({ deleted: parts[2] }, 200), "agent_delete", { agent_id: parts[2] });
-      }
-
-      // PUT /v1/secrets/:agentId/:name  （存靜態 secret，例如 smtp.password）
-      if (parts[1] === "secrets" && parts.length === 4 && request.method === "PUT") {
-        const [, , agentId, name] = parts;
-        if (!AGENT_ID_RE.test(agentId)) return finish(json({ error: "invalid_agent_id" }, 400));
-        if (!/^[a-z0-9][a-z0-9._-]{0,47}$/.test(name)) return finish(json({ error: "invalid_secret_name" }, 400));
-        const body = await request.json().catch(() => null);
-        if (!body || body.value === undefined) return finish(json({ error: "missing_value" }, 400));
-        let stored;
-        try {
-          stored = await encryptSecret(env, agentId, name, String(body.value));
-        } catch (error) {
-          return finish(json({ error: sanitizeDetail(error && error.message) }, error.status || 503));
-        }
-        await env.BROKER_KV.put(`sec:${agentId}:${name}`, stored);
-        return adminDone(json({ stored: { agent: agentId, name, encrypted: true } }, 201), "secret_put", { agent_id: agentId, name });
-      }
-
-      // DELETE /v1/secrets/:agentId/:name
-      if (parts[1] === "secrets" && parts.length === 4 && request.method === "DELETE") {
-        await env.BROKER_KV.delete(`sec:${parts[2]}:${parts[3]}`);
-        return adminDone(json({ deleted: { agent: parts[2], name: parts[3] } }, 200), "secret_delete", { agent_id: parts[2], name: parts[3] });
-      }
-
-      // GET /v1/admin/audit?limit=50&kind=claim|admin  （N4：讀回 audit 記錄）
-      if (parts[1] === "admin" && parts[2] === "audit" && request.method === "GET") {
-        if (!env.AUDIT_DB) return finish(json({ error: "audit_db_not_configured" }, 503));
-        const readRl = await bumpRate(env, "auditRead", ipSubject);
-        if (!readRl.allowed) {
-          const res = json({ error: "rate_limited", retry_after: readRl.retryAfter }, 429);
-          res.headers.set("Retry-After", String(readRl.retryAfter));
-          return finish(res);
-        }
-        const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") || 50), 200));
-        const kind = url.searchParams.get("kind");
-        const cols =
-          "ts,kind,agent_id,actor,action,wants,result,status,ip_hash,latency_ms,details";
-        const stmt = kind
-          ? env.AUDIT_DB.prepare(`SELECT ${cols} FROM audit WHERE kind = ? ORDER BY id DESC LIMIT ?`).bind(kind, limit)
-          : env.AUDIT_DB.prepare(`SELECT ${cols} FROM audit ORDER BY id DESC LIMIT ?`).bind(limit);
-        const result = await stmt.all();
-        return finish(json({ rows: (result && result.results) || [], limit, kind: kind || null }, 200));
-      }
-
-      // POST /v1/admin/reencrypt  （把舊明文 sec:* 就地改寫成信封加密）
-      if (parts[1] === "admin" && parts[2] === "reencrypt" && request.method === "POST") {
-        if (!masterKeyBytes(env)) return finish(json({ error: "encryption_not_configured" }, 503));
-        const list = await env.BROKER_KV.list({ prefix: "sec:" });
-        let migrated = 0;
-        let skipped = 0;
-        const failed = [];
-        for (const k of list.keys) {
-          const keyParts = k.name.split(":"); // ["sec", agentId, name]
-          if (keyParts.length !== 3) continue;
-          try {
-            const raw = await env.BROKER_KV.get(k.name, "text");
-            if (raw === null) continue;
-            const dec = await decryptSecret(env, keyParts[1], keyParts[2], raw);
-            if (!dec.legacy) {
-              skipped += 1;
-              continue;
-            }
-            await env.BROKER_KV.put(k.name, await encryptSecret(env, keyParts[1], keyParts[2], dec.value));
-            migrated += 1;
-          } catch (error) {
-            failed.push({ key: k.name, error: sanitizeDetail(error && error.message) });
-          }
-        }
-        return adminDone(
-          json({ migrated, already_encrypted: skipped, failed: failed.length, details: failed }, 200),
-          "reencrypt",
-          { migrated, failed: failed.length },
-        );
-      }
-
-      return finish(new Response("Not Found", { status: 404 }));
-    }
-
-    /* ===================== (A) 舊：/github-token ===================== */
-    if (url.pathname !== "/github-token" || request.method !== "POST") {
-      return finish(new Response("Not Found", { status: 404 }));
-    }
-    // 舊 bearer flow 默認下架（回歸測試時才設 LEGACY_BEARER_ENABLED=true）
-    if (env.LEGACY_BEARER_ENABLED !== "true") {
-      return finish(new Response("Not Found", { status: 404 }));
-    }
-    if (!env.AGENT_TOKEN) {
-      return finish(json({ error: "broker misconfigured" }, 500));
-    }
-    const header = request.headers.get("Authorization") || "";
-    const provided = header.startsWith("Bearer ") ? header.slice(7) : "";
-    if (!safeEqual(provided, env.AGENT_TOKEN)) {
-      return finish(new Response("Unauthorized", { status: 401 }));
-    }
-
-    const body = await request.json().catch(() => null);
-    if (!body || body.installation_id === undefined || body.installation_id === null) {
-      return finish(json({ error: "missing installation_id" }, 400));
-    }
-    installationId = String(body.installation_id);
-    if (!/^\d{1,20}$/.test(installationId)) {
-      return finish(json({ error: "invalid installation_id" }, 400));
-    }
-
-    if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PEM_BASE64) {
-      return finish(json({ error: "broker misconfigured" }, 500));
-    }
-
-    // 舊 flow 必須有 repo allowlist，避免 mint 出全 installation 範圍的 token
-    const legacyRepos = String(env.LEGACY_REPOSITORIES || "")
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean);
-    if (legacyRepos.length === 0) {
-      return finish(json({ error: "legacy_repo_allowlist_missing" }, 403));
-    }
-
-    try {
-      const minted = await mintInstallationToken(env, installationId, { repositories: legacyRepos });
-      // 只揀三個欄位，唔 spread 整個 GitHub response
-      return finish(json(minted, 200));
-    } catch (error) {
-      // 錯誤只講類型，唔回傳 stack
-      return finish(
-        json(
-          { error: "internal error", github_status: error.githubStatus, detail: sanitizeDetail(error && error.message) },
-          500,
-        ),
-      );
-    }
+    // 舊 bearer flow 已完全下架（admin／共享 token 一併撤出 Worker 邊界）
+    return finish(new Response("Not Found", { status: 404 }));
   },
 };
+
+// 供契約測試直接使用（唔會暴露喺 HTTP 介面）
+export { encryptSecret, decryptSecret, hashIp, canonicalPayload };

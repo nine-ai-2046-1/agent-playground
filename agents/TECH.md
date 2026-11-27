@@ -23,7 +23,7 @@
 ┌─────────── agent 機器 ───────────┐        ┌──── Cloudflare ─────┐
 │ broker CLI                       │        │ Worker (v2)         │
 │  ├ Keychain: 私鑰 (Ed25519)      │  簽名  │  ├ /v1/claim 驗簽   │
-│  ├ config.json: brokerUrl, id    │ ─────> │  ├ 管理 API (admin) │
+│  ├ config.json: brokerUrl, id    │ ─────> │  ├ (冇 admin API)   │
 │  └ 子進程 env: GH_TOKEN …         │ <───── │  └ /health          │
 └──────────────────────────────────┘ secret │        │            │
                                              │        ├ KV BROKER_KV│
@@ -61,10 +61,10 @@
 
 | Key | Value | 說明 |
 | :-- | :-- | :-- |
-| `agent:<id>` | JSON `{id, pubkey, status, entitlements[], github{installation_id,repositories[],permissions}, created_at, updated_at}` | `pubkey` = base64url(raw 32 bytes) |
+| `agent:<id>` | JSON `{id, pubkey, status, entitlements[], github{installation_id,repositories[],permissions}, created_at, updated_at, last_used_at, last_used_machine, last_used_ip}` | `pubkey` = base64url(raw 32 bytes) |
 | `sec:<agent>:<name>` | JSON `{v:1, alg:"A256GCM", iv, ct}` | 靜態 secret 信封加密（AES-256-GCM，AAD=`sec\|<agent>\|<name>`）；`github` 唔用呢個 key；讀到非信封格式當 legacy 明文 |
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s | 重放保護；**先寫後派**，寫失敗即拒絕 |
-| `rl:claim:<hash>` / `rl:admin:<hash>` / `rl:auditread:<hash>` | 數字字串，TTL 90s | N2 固定窗限流計數器；`<hash>` = `SHA-256(agent|ip)` 等前 16 hex |
+| `rl:claim:<hash>` | 數字字串，TTL 90s | 固定窗限流計數器；`<hash>` = `SHA-256(agent|ip)` 前 16 hex |
 
 命名規則（Worker 強制）：
 
@@ -127,25 +127,28 @@ v1|<agent_id>|<wants.join(",")>|<ts>|<nonce>
 `github` 的 `resolveSecret`：用 `agent.github.installation_id` mint token，
 `repositories`（最多 20 個）同 `permissions` 一齊傳去 GitHub；未配置 → 403 `github_not_configured`。
 
-### 5.3 管理 API（`Authorization: Bearer <AGENT_TOKEN>`）
+### 5.3 registry 管理（**冇 admin API，全部喺 Cloudflare 帳號層**）
 
-| Method / Path | 作用 | 備註 |
-| :-- | :-- | :-- |
-| `PUT /v1/agents/:id` | 登記／輪替公鑰 | body: `{pubkey, status?, entitlements[], github?}`；省略 `github` 會沿用舊值 |
-| `GET /v1/agents` | 列表 | 公鑰只露前 12 字元 |
-| `GET /v1/agents/:id` | 單筆全值 | 供輪替／加 entitlement |
-| `DELETE /v1/agents/:id` | 撤銷 | 即刻 401 |
-| `PUT /v1/secrets/:agentId/:name` | 存靜態 secret | body `{value}`；加密後才落 KV；未設 `BROKER_MASTER_KEY` → 503 |
-| `DELETE /v1/secrets/:agentId/:name` | 刪 | |
-| `POST /v1/admin/reencrypt` | 遷移舊明文 | 掃 `sec:` prefix，逐個 decrypt→encrypt→put |
+2026-11-27 定案：Worker 只保留 `/health` 同 `/v1/claim`。`/v1/agents*`、`/v1/secrets*`、`/v1/admin/*`、`/github-token` **一律 404**，程式碼同 `AGENT_TOKEN`／`safeEqual` 已刪。改資料只可以：
 
-Admin 認證（N2）：`AGENT_TOKEN`（current）+ `AGENT_TOKEN_PREV`（輪替重疊期）雙 token，`safeEqual` 固定時間比較，錯誤只回 `401`；通過後 `actor` = `admin:current` / `admin:prev`，寫入 audit。
-Admin 限流：`rl:admin:<hash(ip)>`，默認 60/min（`ADMIN_RATE_LIMIT`）。
-寫操作全部落 audit（`action` = `agent_put` / `agent_delete` / `secret_put` / `secret_delete` / `reencrypt`）。
+| 動作 | 做法 |
+| :-- | :-- |
+| 登記／換公鑰／改 entitlement／停用 | 改 KV `agent:<id>` JSON（Dashboard 或 `wrangler kv key put`）；CLI 用 `broker ask-register` 印 JSON |
+| 加／換靜態 secret | 本機 `scripts/secret-envelope.mjs` 加密 → `wrangler kv key put "sec:<agent>:<name>"` |
+| 撤銷 | 刪 KV `agent:<id>`（Dashboard／wrangler）—— CLI 同 Worker 都冇 delete |
+| 舊明文遷移 | `decrypt` 仍接受 legacy 明文；用 envelope script 重新加密覆寫該 key |
+
+理由：Cloudflare 帳號成為唯一 root of trust（配合 2FA），CLI 原始碼公開派都冇能力寫伺服器資料；同時消除共享 token 帶嚟嘅暴力猜測／重放／靜默接管風險。
 
 ### 5.4 審計讀取（N4）
 
-`GET /v1/admin/audit?limit=&kind=`（admin auth；限流 30/min，`AUDIT_RATE_LIMIT`）
+冇 HTTP 讀取端點（避免多一個要認證嘅面）。查法：
+
+```bash
+npx wrangler d1 execute broker-audit --remote --command \
+  "SELECT ts,kind,agent_id,result,status,ip_hash,machine_id FROM audit ORDER BY id DESC LIMIT 20"
+```
+
 
 ```json
 {"rows":[{"id":42,"ts":"2026-11-27T11:25:04.251Z","kind":"claim","agent_id":"ci-e2e-01","actor":null,"action":null,"wants":"[\"github\"]","result":"ok","status":200,"ip_hash":"45398917097cb852","ua":"…","latency_ms":null,"details":"{\"delivered\":[\"github\"],\"errors\":[]}"}],"limit":50}
@@ -156,9 +159,9 @@ D1（`AUDIT_DB` / database `broker-audit`）schema：
 | 欄 | 型 | 說明 |
 | :-- | :-- | :-- |
 | `ts` | TEXT | ISO8601 UTC（`new Date().toISOString()`） |
-| `kind` | TEXT | `claim` / `admin` |
+| `kind` | TEXT | `claim`（N7 後只有 claim 一種） |
 | `wants` | TEXT | JSON 陣列（claim 請求嘅 key） |
-| `actor` | TEXT NULL | `admin:current` / `admin:prev` / NULL |
+| `actor` | TEXT NULL | 預留（N7 後 Worker 已無 admin 路徑，一般 NULL） |
 | `action` | TEXT | `claim` / `agent_put` / `secret_put` … |
 | `agent_id` | TEXT NULL | 目標 agent |
 | `result` | TEXT | `ok` / `failed` / `partial` / `not_entitled` / `replay` / `rate_limited` … |
@@ -185,7 +188,8 @@ D1（`AUDIT_DB` / database `broker-audit`）schema：
 | 身份 | `cmdInit`、`cmdWhoami`、`cmdPubkey`、`cmdRotate` |
 | claim | `signPayload` → `doClaim`（含退出碼映射）→ `cmdClaim`（遮罩／`--print`／`--env`）|
 | exec | `cmdExec`：claim → 注入 env → `spawnSync`，回傳子進程 exit code |
-| admin | `cmdRegister`、`cmdAgents`、`cmdSecretPut`、`cmdAdminLogin`；admin token 只讀 `BROKER_ADMIN_TOKEN`（env）或 Keychain `secret-broker-admin`；**刻意唔接受 `--admin-token`**（argv 會外洩）|
+| registry | `cmdAskRegister` 只印 JSON（唔寫、唔上網）；舊 `register`／`agents`／`secret-put`／`admin-login`／`delete` 一律 `usageDie()` 提示去 Cloudflare |
+| 每請求標頭 | `callBroker` 自動帶 `X-Broker-Machine`（IOPlatformUUID→SHA-256 前 16 hex）同 `X-Broker-Client: broker-cli/<ver>` |
 
 **退出碼契約**（agent 依賴它分流，唔可以隨便改）：
 
@@ -225,7 +229,9 @@ npx wrangler secret put GITHUB_APP_PEM_BASE64 < pem.base64.txt
 npx wrangler deploy
 ```
 
-必要 secrets：`GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`、`AGENT_TOKEN`、`BROKER_MASTER_KEY`（base64url 32 bytes；本機備份 `~/Doubao/secrets/broker-master-key.b64`，600）。
+必要 secrets：`GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`、`BROKER_MASTER_KEY`（base64url 32 bytes；本機備份 `~/Doubao/secrets/broker-master-key.b64`，600）。
+
+`AGENT_TOKEN`／`AGENT_TOKEN_PREV` 已無程式引用，部署後應 `wrangler secret delete` 清走。
 
 ```bash
 # N3 master key（一次性；輪替前要先加舊 key 支援解密，見 README 已知限制）
@@ -255,10 +261,10 @@ BROKER_URL=http://127.0.0.1:8787 broker claim github --agent opencode-01
 1. **契約測試（已入 repo）**：
 
 ```bash
-node worker/scripts/contract-test.mjs      # 30 項，自帶 mock KV + mock D1 + ctx.waitUntil 收集器，唔需要 wrangler／網絡
+node worker/scripts/contract-test.mjs      # 22 項，自帶 mock KV + mock D1 + ctx.waitUntil 收集器，唔需要 wrangler／網絡
 ```
 
-   覆蓋：health（含 `encryption` / `audit` / `rate_limit` 旗標）、admin token 輪替（current/prev/錯 token）、D1 audit 有記錄／無明文／actor 標記／IP 只存 hash、`GET /v1/admin/audit`、claim 限流 429 + `Retry-After`、admin 認證、未知 agent、錯簽、ts 過期、重放、無 entitlement、靜態 secret、撤銷、404、no-store 全覆蓋、舊 endpoint 默認下架 + 缺 allowlist 403、**KV 內 sec:* 為密文**、legacy 明文兼容、`reencrypt` 遷移、未設 master key → 503。
+   覆蓋：health 旗標、admin 端點全 404、claim 全流程（成功／遮罩欄位／`last_used_*` 回寫）、未知 agent、錯簽、ts 過期／未來、重放、撤銷、無 entitlement、未知 secret、靜態 secret 信封、legacy 明文可讀、`machine_id` 落 D1、D1 無明文、IP 只存 hash、限流 429 + `Retry-After`、no-store 全覆蓋、舊 `/github-token` 404。
    「真 mint GitHub token」唔在內（要真 PEM，屬生產／本機 `.dev.vars` 測試）。
 2. **CLI 退出碼**：
 
@@ -319,7 +325,7 @@ GH_TOKEN=<只讀 token> REL_TAG=v<ver> bash scripts-bootstrap-install.sh
 | NIN-190 | S6 CLI + 管理 API | Done |
 | NIN-191 | S7 安全方案（Ed25519 簽名、拒絕 Access 綁卡路線） | Done |
 | NIN-192 | S8 四份文件（README / TECH / DEV / USER）| **未做** — 本 repo 的 `agents/*` 已覆蓋大部分 |
-| NIN-193 | S9 final review（Access 未開、admin 單點、無 envelope encryption、舊 endpoint 下架）| **未做** |
+| NIN-193 | S9 final review（N7 後：admin 面全撤、envelope encryption 已上、舊 endpoint 404、E2E 已跑）| **進行中** |
 
 未實作的 roadmap 項目：
 

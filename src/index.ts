@@ -18,7 +18,6 @@ const DEFAULT_BROKER_URL = "https://github-token-broker.baobao2046.workers.dev";
 const CONFIG_DIR = path.join(os.homedir(), ".config", "secret-broker");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 const KEYS_DIR = path.join(CONFIG_DIR, "keys");
-const ADMIN_KEYCHAIN_SERVICE = "secret-broker-admin";
 
 // ---------------------------------------------------------------- utilities
 
@@ -202,15 +201,38 @@ function signPayload(agentId: string, wants: string[], ts: number, nonce: string
 
 // ----------------------------------------------------------------- http api
 
+/** 本機機械指紋：硬件 UUID → SHA-256 前 16 hex（只送指紋，永不送原值） */
+let cachedMachine: string | null = null;
+function machineFingerprint(): string {
+  if (cachedMachine) return cachedMachine;
+  let source = "";
+  if (isMac) {
+    const res = spawnSync("ioreg", ["-d2", "-c", "IOPlatformExpertDevice"], { encoding: "utf8" });
+    const m = (res.stdout || "").match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+    if (m) source = m[1];
+  } else {
+    try {
+      source = fs.readFileSync("/etc/machine-id", "utf8").trim();
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!source) source = `${os.hostname()}:${os.userInfo().username}`;
+  cachedMachine = crypto.createHash("sha256").update(source).digest("hex").slice(0, 16);
+  return cachedMachine;
+}
+
 async function callBroker<T>(
   config: Config,
   method: string,
   pathname: string,
   body?: unknown,
-  adminToken?: string,
 ): Promise<{ status: number; json: T | null }> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (adminToken) headers.Authorization = `Bearer ${adminToken}`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-Broker-Machine": machineFingerprint(),
+    "X-Broker-Client": `broker-cli/${readCliVersion()}`,
+  };
   let response: Response;
   try {
     response = await fetch(`${config.brokerUrl}${pathname}`, {
@@ -230,18 +252,6 @@ async function callBroker<T>(
     json = null;
   }
   return { status: response.status, json };
-}
-
-function adminToken(_flags: Record<string, string | true>): string {
-  // 刻意唔接受 --admin-token：token 走 argv 會出現在 shell history 同 process list
-  if (process.env.BROKER_ADMIN_TOKEN) return process.env.BROKER_ADMIN_TOKEN;
-  if (isMac) {
-    const res = spawnSync("security", ["find-generic-password", "-s", ADMIN_KEYCHAIN_SERVICE, "-w"], {
-      encoding: "utf8",
-    });
-    if (res.status === 0 && res.stdout.trim()) return res.stdout.trim();
-  }
-  die("冇 admin token；設 BROKER_ADMIN_TOKEN（env）或先 `broker admin-login --token-stdin`");
 }
 
 // ---------------------------------------------------------------- env names
@@ -302,119 +312,6 @@ function cmdWhoami(config: Config, flags: Record<string, string | true>) {
 function cmdPubkey(config: Config, flags: Record<string, string | true>) {
   const agent = resolveAgent(config, flags);
   console.log(derivePublicKey(agent));
-}
-
-async function cmdRegister(config: Config, flags: Record<string, string | true>) {
-  const agent =
-    flagString(flags, "agent") || usageDie("用法：broker register --agent <id> [--pubkey <raw>] [--entitlements a,b]");
-  const token = adminToken(flags);
-  const pubkey = flagString(flags, "pubkey") || derivePublicKey(agent);
-
-  let entitlements: string[];
-  const entitlementsFlag = flagString(flags, "entitlements");
-  if (entitlementsFlag) {
-    entitlements = entitlementsFlag.split(",").map((s) => s.trim()).filter(Boolean);
-  } else {
-    const existing = await callBroker<{ agent: { entitlements?: string[] } }>(
-      config,
-      "GET",
-      `/v1/agents/${agent}`,
-      undefined,
-      token,
-    );
-    entitlements = existing.status === 200 && Array.isArray(existing.json?.agent?.entitlements)
-      ? existing.json!.agent.entitlements!
-      : ["github"];
-  }
-
-  const github: Record<string, unknown> = {};
-  const installation = flagString(flags, "installation-id");
-  if (installation) github.installation_id = Number(installation);
-  const repositories = flagString(flags, "repositories");
-  if (repositories) github.repositories = repositories.split(",").map((s) => s.trim()).filter(Boolean);
-  const permissions = flagString(flags, "permissions"); // e.g. contents=read,pull_requests=read
-  if (permissions) {
-    github.permissions = Object.fromEntries(
-      permissions.split(",").map((pair) => pair.split("=").map((s) => s.trim()) as [string, string]),
-    );
-  }
-
-  const body: Record<string, unknown> = { pubkey, entitlements };
-  if (Object.keys(github).length > 0) body.github = github;
-  if (flags["status"] === "disabled") body.status = "disabled";
-
-  const res = await callBroker<{ agent: { id: string; entitlements: string[] } }>(
-    config,
-    "PUT",
-    `/v1/agents/${agent}`,
-    body,
-    token,
-  );
-  if (res.status !== 201) die(`登記失敗：HTTP ${res.status} ${JSON.stringify(res.json)}`);
-  console.log(`✔ 已登記 agent「${res.json?.agent.id}」，entitlements=${res.json?.agent.entitlements.join(",")}`);
-}
-
-async function cmdAgents(config: Config, flags: Record<string, string | true>) {
-  const res = await callBroker<{ agents: Array<Record<string, unknown>> }>(
-    config,
-    "GET",
-    "/v1/agents",
-    undefined,
-    adminToken(flags),
-  );
-  if (res.status !== 200) die(`讀取失敗：HTTP ${res.status}`);
-  const agents = res.json?.agents || [];
-  if (agents.length === 0) {
-    console.log("(registry 未有 agent)");
-    return;
-  }
-  for (const a of agents) {
-    console.log(`- ${a.id}  [${a.status}]  entitlements=${(a.entitlements as string[]).join(",") || "-"}  pubkey=${a.pubkey}`);
-  }
-}
-
-async function cmdSecretPut(config: Config, flags: Record<string, string | true>) {
-  const agent = flagString(flags, "agent") || usageDie("用法：broker secret-put --agent <id> --name <key> （值由 stdin 讀）");
-  const name = flagString(flags, "name") || usageDie("缺 --name");
-  const rawInput = fs.readFileSync(0, "utf8"); // 值只經 stdin，禁止 --value（argv 會外洩）
-  const value = rawInput.replace(/\n$/, "");
-  if (!value) usageDie("值為空（值只可以經 stdin 提供）");
-  const res = await callBroker<{ stored: unknown }>(
-    config,
-    "PUT",
-    `/v1/secrets/${agent}/${name}`,
-    { value },
-    adminToken(flags),
-  );
-  if (res.status !== 201) die(`寫入失敗：HTTP ${res.status}`);
-  console.log(`✔ 已存入 ${agent}/${name}（${maskValue(value)}）`);
-
-  // --grant：自動把呢個 key 加入該 agent 嘅 entitlements（唔會覆蓋現有清單）
-  if (flags.grant) {
-    const token = adminToken(flags);
-    const existing = await callBroker<{ agent: Record<string, unknown> & { pubkey?: string; entitlements?: string[] } }>(
-      config,
-      "GET",
-      `/v1/agents/${agent}`,
-      undefined,
-      token,
-    );
-    if (existing.status !== 200 || !existing.json?.agent?.pubkey) {
-      console.log(`⚠ 未加到 entitlement：registry 內冇 agent「${agent}」，先跑 broker register`);
-      return;
-    }
-    const record = existing.json.agent;
-    const entitlements = Array.from(new Set([...(record.entitlements || []), name]));
-    const put = await callBroker(
-      config,
-      "PUT",
-      `/v1/agents/${agent}`,
-      { pubkey: record.pubkey, entitlements, github: record.github ?? null, status: record.status ?? "active" },
-      token,
-    );
-    if (put.status !== 201) die(`加 entitlement 失敗：HTTP ${put.status}`);
-    console.log(`✔ entitlement 已更新：${entitlements.join(",")}`);
-  }
 }
 
 interface ClaimResponse {
@@ -493,25 +390,12 @@ function cmdRotate(config: Config, flags: Record<string, string | true>) {
   console.log(`  broker register --agent ${agent} --pubkey ${rawPublic} --entitlements <維持原清單>`);
 }
 
-async function cmdAdminLogin(flags: Record<string, string | true>) {
-  const token = flags["token-stdin"] ? fs.readFileSync(0, "utf8").trim() : flagString(flags, "token");
-  if (!token) usageDie("用法：broker admin-login --token-stdin（由 stdin 讀 admin token）");
-  if (isMac) {
-    const res = spawnSync("security", ["add-generic-password", "-U", "-s", ADMIN_KEYCHAIN_SERVICE, "-a", "admin", "-w", token], {
-      encoding: "utf8",
-    });
-    if (res.status !== 0) die(`Keychain 寫入失敗：${(res.stderr || "").trim()}`);
-    console.log(`✔ admin token 已存入 Keychain（service=${ADMIN_KEYCHAIN_SERVICE}）`);
-    return;
-  }
-  die("非 macOS：請用環境變數 BROKER_ADMIN_TOKEN");
-}
-
 function usage() {
   console.log(`broker — per-agent Secret Broker CLI (v${readCliVersion()})
 
 用法:
   broker init --agent <id> [--broker-url <url>] [--force]      建立 agent 身份（Ed25519；macOS→Keychain，Linux→600 檔）
+  broker ask-register [--agent <id>]                          印出「要喺 Cloudflare 寫入嘅 agent JSON」
   broker whoami [--agent <id>]                                 顯示本機身份
   broker pubkey [--agent <id>]                                 由私鑰推導公鑰（register 用，唔需要抄）
   broker health                                                檢查 broker
@@ -519,20 +403,16 @@ function usage() {
   broker claim [key...] [--print|--env|--json] [--agent <id>]   取 secret（預設遮罩摘要）
   broker exec [--keys github] -- <command...>                  取 secret 後注入環境變數再跑命令
 
-  broker register --agent <id> [--pubkey <raw>] [--entitlements a,b]   [admin] 登記 / 輪替公鑰
-  broker agents                                                [admin] 列出 registry
-  broker secret-put --agent <id> --name <key> [--grant]        [admin] 存靜態 secret（stdin 讀值；--grant 自動加 entitlement）
-  broker admin-login --token-stdin                             [admin] 存 admin token 入 Keychain
-  broker rotate [--agent <id>]                                 換 keypair（之後要 register 新公鑰）
+  broker rotate [--agent <id>]                                 換 keypair（舊公鑰即刻失效）
 
 環境變數:
   BROKER_PRIVATE_KEY   agent 私鑰（base64 PKCS#8；CI／容器用，優先於 Keychain／檔案）
-  BROKER_ADMIN_TOKEN   admin token（否則讀 Keychain service ${ADMIN_KEYCHAIN_SERVICE}）
   BROKER_AGENT_ID      預設 agent id
   BROKER_URL           覆蓋 broker 網址（等同 init 時 --broker-url）
 
 安全慣例:
-  所有 secret 值只經 stdin／Keychain／env 提供；CLI 刻意唔接受 --value / --admin-token（argv 會外洩）。
+  私鑰只經 Keychain／600 檔／BROKER_PRIVATE_KEY 提供，永不經網絡傳出。
+  本 CLI 冇 admin 功能：registry／secret 一律喺 Cloudflare 帳號層維護，所以 CLI 原始碼可以公開發佈。
 
 慣例:
   github  → GH_TOKEN / GITHUB_TOKEN
@@ -581,16 +461,11 @@ async function main() {
       await cmdExec(config, flags, positional);
       return;
     case "register":
-      await cmdRegister(config, flags);
-      return;
     case "agents":
-      await cmdAgents(config, flags);
-      return;
     case "secret-put":
-      await cmdSecretPut(config, flags);
-      return;
     case "admin-login":
-      await cmdAdminLogin(flags);
+    case "delete":
+      usageDie("admin 指令已撤出 CLI：registry／secret 只喺 Cloudflare Dashboard 或 wrangler 維護（見 README「註冊與管理」）");
       return;
     case "rotate":
       cmdRotate(config, flags);

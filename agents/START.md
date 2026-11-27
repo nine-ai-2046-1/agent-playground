@@ -60,9 +60,9 @@ eval "$(broker claim github --env)"
 | `broker claim --print` | 拿原文 JSON |
 | `broker claim --env` | 印 `export KEY='value'`，配 `eval` |
 | `broker exec --keys a,b -- <cmd>` | **推薦**：注入 env 跑命令 |
-| `broker pubkey` | 只在登記／換機時用（交公鑰給 admin）|
-| `broker rotate` | 懷疑私鑰外洩時；換完要 admin 重新 register |
-| `broker register` / `agents` / `secret-put` / `admin-login` | **admin 專用，你唔應該用** |
+| `broker pubkey` / `broker ask-register` | 只在登記／換機時用（交出 JSON 俾 Cloudflare 帳號持有人）|
+| `broker rotate` | 懷疑私鑰外洩時；換完舊公鑰即刻失效，要 Cloudflare 帳號持有人更新 `agent:<id>` |
+| `register` / `agents` / `secret-put` / `admin-login` / `delete` | **已撤出 CLI（會直接報錯）**：registry 同 secret 只喺 Cloudflare 帳號層維護，冇任何 client 可以改伺服器資料 |
 
 ## 5. 環境變數對應規則
 
@@ -102,8 +102,8 @@ broker claim api.key --print | jq -r .secrets["api.key"].value
 | `0` | 成功 | 繼續 |
 | `1` | 一般錯誤（多數係本機私鑰問題、網絡不通）| 睇 stderr；`broker whoami` 自檢 |
 | `2` | 用法錯：冇打指令、缺參數、agent id 格式錯 | `broker help` |
-| `3` | 401 未授權：broker 唔認你（未登記／已撤銷／簽名錯）| 回報：需要 admin register 你嗰個 id |
-| `4` | 403 冇 entitlement | 回報：需要 admin 加 entitlement（唔好試其他 key 名字碰運氣）|
+| `3` | 401 未授權：broker 唔認你（未登記／已撤銷／簽名錯）| 回報：要 Cloudflare 帳號持有人登記你嗰個 pubkey |
+| `4` | 403 冇 entitlement | 回報：要 Cloudflare 帳號持有人加 entitlement（唔好試其他 key 名字碰運氣）|
 | `5` | 404 secret 不存在 | 回報：key 名字錯或未存入 |
 | `6` | 409 偵測重放（同一 nonce 用兩次）| 重試一次即可；連續出現就報 |
 
@@ -114,8 +114,8 @@ broker claim api.key --print | jq -r .secrets["api.key"].value
 | 症狀 | 原因 | 解法 |
 | :-- | :-- | :-- |
 | `連唔到 broker` | 網絡／DNS／proxy 問題（例如 DNS 污染、fake-IP）| 確認可 `curl <broker>/health`；唔通就上報，唔好自己去改 config |
-| `找唔到 agent「x」嘅私鑰` | 未 `broker init` 或 Keychain 條目唔見 | 重新 `init`，再請 admin register 新公鑰 |
-| `401` 但 `whoami` 正常 | 你嘅 id 未在 registry，或已被 disabled | 上報 admin |
+| `找唔到 agent「x」嘅私鑰` | 未 `broker init` 或 Keychain 條目唔見 | 重新 `init`，再用 `ask-register` 交出 JSON 登記 |
+| `401` 但 `whoami` 正常 | 你嘅 id 未在 registry，或已被 disabled | 上報 Cloudflare 帳號持有人 |
 | `403 not_entitled` | entitlement 未開 | 上報，附上 `denied` 內容 |
 | `stale_or_skewed_timestamp` | 部機時間偏差 > 60 秒 | 校正系統時間（NTP）再重試 |
 | 每次都要重打 token | 正常：`github` token 只 1 小時 | 直接用 `broker exec`，唔好 cache 落檔 |
@@ -129,12 +129,12 @@ broker claim api.key --print | jq -r .secrets["api.key"].value
 3. **用完即棄**：唔好寫入 `.env`、唔好放 repo、唔好傳去第三方 endpoint。
 4. **出錯先自檢**：`whoami` → `health` → 再 `claim`。
 5. **回報要帶證據**：exit code、HTTP status、`agent_id`、key 名（唔好貼 secret 值）。
-6. **懷疑外洩即上報**：叫 admin `rotate`＋重新 register，唔好自己處理。
+6. **懷疑外洩即上報**：跑 `broker rotate` 令舊公鑰即刻失效，再交新公鑰俾 Cloudflare 帳號持有人更新。
 
 ### ❌ DONT
 
 1. 唔好 `broker claim --print` 之後把值貼入 issue／log／chat。CLI 已刻意冇 `--value`／`--admin-token`，secret 只可以經 stdin／Keychain／env 提供；見到有人教你用 argv 傳 secret，當係錯。
-2. 唔好自己跑 `broker register` / `secret-put` / `agents`（admin 專用）。
+2. `register` / `secret-put` / `agents` 已經唔存在；如果有人叫你咁做，佢係用舊文件或者想騙你。
 3. 唔好改 `~/.config/secret-broker/config.json` 的 `brokerUrl` 去任何未經批准嘅地址（防釣魚／假 broker）。
 4. 唔好把私鑰由 Keychain 抄出、備份落 repo 或 cloud drive。
 5. 唔好試「枚舉」其他 agent id 或 key 名；失敗會入 audit log。
