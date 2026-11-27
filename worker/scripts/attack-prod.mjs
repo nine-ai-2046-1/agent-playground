@@ -276,14 +276,15 @@ if (key) {
     const ts = now();
     const n = nonce();
     const r = await req("POST", "/v1/claim", { body: { agent_id: AGENT, wants: ["github"], ts, nonce: n, sig: sign(AGENT, ["github"], ts, n) } });
-    hits.push({ status: r.status, ra: r.headers.get("retry-after") });
+    hits.push({ status: r.status, ra: r.headers.get("retry-after"), body: r.status >= 500 ? r.text.slice(0, 120) : undefined, cf: r.headers.get("cf-ray") });
     if (r.status === 429) break;
   }
   const first429 = hits.find((h) => h.status === 429);
   check("突發請求觸發 429", Boolean(first429), first429 ? `Retry-After=${first429.ra}` : "45 次都冇 429");
   check("429 有數字 Retry-After", Boolean(first429 && Number(first429.ra) > 0), first429 ? String(first429.ra) : "無");
   const bad = hits.filter((h) => h.status >= 500);
-  check("限流期間冇 5xx", bad.length === 0, bad.length ? `${bad.length} 個 5xx` : "");
+  const dist = hits.map((h) => h.status).join(",");
+  check("限流期間冇 5xx", bad.length === 0, bad.length ? `${bad.length} 個 5xx | ${bad[0].status} ${bad[0].body} | 序列 ${dist}` : `序列 ${dist}`);
 }
 
 /* ---------- 總結 ---------- */
