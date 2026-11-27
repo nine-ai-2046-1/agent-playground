@@ -64,6 +64,7 @@
 | `agent:<id>` | JSON `{id, pubkey, status, entitlements[], github{installation_id,repositories[],permissions}, created_at, updated_at}` | `pubkey` = base64url(raw 32 bytes) |
 | `sec:<agent>:<name>` | JSON `{v:1, alg:"A256GCM", iv, ct}` | 靜態 secret 信封加密（AES-256-GCM，AAD=`sec\|<agent>\|<name>`）；`github` 唔用呢個 key；讀到非信封格式當 legacy 明文 |
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s | 重放保護；**先寫後派**，寫失敗即拒絕 |
+| `rl:claim:<hash>` / `rl:admin:<hash>` / `rl:auditread:<hash>` | 數字字串，TTL 90s | N2 固定窗限流計數器；`<hash>` = `SHA-256(agent|ip)` 等前 16 hex |
 
 命名規則（Worker 強制）：
 
@@ -75,7 +76,7 @@
 
 ### 5.1 `GET /health`
 
-`{"ok":true,"version":"v2","kv":true,"ed25519":true}` — 不洩任何設定，無 auth。
+`{"ok":true,"version":"v2","kv":true,"ed25519":true,"encryption":true,"audit":true,"rate_limit":true}` — 只係布林旗標（D1 綁定喺咗、master key 有冇、限流開唔開），不洩任何值，無 auth。
 
 ### 5.2 `POST /v1/claim`（agent 用）
 
@@ -97,6 +98,7 @@ v1|<agent_id>|<wants.join(",")>|<ts>|<nonce>
 
 驗證順序（照此實作，唔好搬）：
 
+0. 限流（**喺讀 agent 之前**）：`rl:claim:<hash>` 固定窗 60s，超 `CLAIM_RATE_LIMIT`（默認 40）→ `429 rate_limited`，回 `Retry-After` 頭 + `retry_after` body 欄位 + `no-store`
 1. body 合法性 → 400
 2. `agent_id` regex → 400
 3. `wants` 1–12 項、每項 regex → 400
@@ -137,9 +139,35 @@ v1|<agent_id>|<wants.join(",")>|<ts>|<nonce>
 | `DELETE /v1/secrets/:agentId/:name` | 刪 | |
 | `POST /v1/admin/reencrypt` | 遷移舊明文 | 掃 `sec:` prefix，逐個 decrypt→encrypt→put |
 
-Admin 認證：單一 `AGENT_TOKEN`，`safeEqual` 固定時間比較；錯誤只回 `401`。
+Admin 認證（N2）：`AGENT_TOKEN`（current）+ `AGENT_TOKEN_PREV`（輪替重疊期）雙 token，`safeEqual` 固定時間比較，錯誤只回 `401`；通過後 `actor` = `admin:current` / `admin:prev`，寫入 audit。
+Admin 限流：`rl:admin:<hash(ip)>`，默認 60/min（`ADMIN_RATE_LIMIT`）。
+寫操作全部落 audit（`action` = `agent_put` / `agent_delete` / `secret_put` / `secret_delete` / `reencrypt`）。
 
-### 5.4 舊相容 endpoint（默認下架）
+### 5.4 審計讀取（N4）
+
+`GET /v1/admin/audit?limit=&kind=`（admin auth；限流 30/min，`AUDIT_RATE_LIMIT`）
+
+```json
+{"rows":[{"ts":1793000000,"kind":"claim","actor":null,"action":"claim","agent_id":"…","outcome":"ok","ip_hash":"…","detail":{…}}],"limit":50}
+```
+
+D1（`AUDIT_DB` / database `broker-audit`）schema：
+
+| 欄 | 型 | 說明 |
+| :-- | :-- | :-- |
+| `ts` | INTEGER | 秒 |
+| `kind` | TEXT | `claim` / `admin` |
+| `actor` | TEXT NULL | `admin:current` / `admin:prev` / NULL |
+| `action` | TEXT | `claim` / `agent_put` / `secret_put` … |
+| `agent_id` | TEXT NULL | 目標 agent |
+| `outcome` | TEXT | `ok` / `error:<code>` |
+| `ip_hash` | TEXT NULL | SHA-256(CF-Connecting-IP) 前 16 hex |
+| `detail` | TEXT | JSON（**永不含 secret 值**，只 name／長度／錯誤碼） |
+
+遷移：`worker/migrations/0001_audit.sql`；`npx wrangler d1 migrations apply broker-audit --remote`。
+寫入喺 `ctx.waitUntil`，失敗只記 `audit:write_failed` 落 console，唔影響主流程。
+
+### 5.5 舊相容 endpoint（默認下架）
 
 `POST /github-token` 默認回 `404`。只有 `LEGACY_BEARER_ENABLED=true` 才啟用，並且必須設 `LEGACY_REPOSITORIES`（逗號分隔）；缺 allowlist → `403 legacy_repo_allowlist_missing`。啟用時 mint 只限 allowlist 內 repo。
 
@@ -223,10 +251,10 @@ BROKER_URL=http://127.0.0.1:8787 broker claim github --agent opencode-01
 1. **契約測試（已入 repo）**：
 
 ```bash
-node worker/scripts/contract-test.mjs      # 20 項，自帶 mock KV，唔需要 wrangler／網絡
+node worker/scripts/contract-test.mjs      # 30 項，自帶 mock KV + mock D1 + ctx.waitUntil 收集器，唔需要 wrangler／網絡
 ```
 
-   覆蓋：health（含 `encryption` 旗標）、admin 認證、未知 agent、錯簽、ts 過期、重放、無 entitlement、靜態 secret、撤銷、404、no-store 全覆蓋、舊 endpoint 默認下架 + 缺 allowlist 403、**KV 內 sec:* 為密文**、legacy 明文兼容、`reencrypt` 遷移、未設 master key → 503。
+   覆蓋：health（含 `encryption` / `audit` / `rate_limit` 旗標）、admin token 輪替（current/prev/錯 token）、D1 audit 有記錄／無明文／actor 標記／IP 只存 hash、`GET /v1/admin/audit`、claim 限流 429 + `Retry-After`、admin 認證、未知 agent、錯簽、ts 過期、重放、無 entitlement、靜態 secret、撤銷、404、no-store 全覆蓋、舊 endpoint 默認下架 + 缺 allowlist 403、**KV 內 sec:* 為密文**、legacy 明文兼容、`reencrypt` 遷移、未設 master key → 503。
    「真 mint GitHub token」唔在內（要真 PEM，屬生產／本機 `.dev.vars` 測試）。
 2. **CLI 退出碼**：
 

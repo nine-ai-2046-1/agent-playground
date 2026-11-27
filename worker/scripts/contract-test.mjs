@@ -39,6 +39,38 @@ function makeKV() {
   };
 }
 
+/** 最小 D1 模擬：只覆蓋 audit INSERT 同 audit SELECT */
+function makeD1() {
+  const rows = [];
+  return {
+    prepare(sql) {
+      const stmt = {
+        params: [],
+        bind(...args) {
+          this.params = args;
+          return this;
+        },
+        async run() {
+          if (sql.includes("INSERT INTO audit")) {
+            const [ts, kind, agent_id, actor, action, wants, result, status, ip_hash, ua, latency_ms, details] =
+              this.params;
+            rows.push({ ts, kind, agent_id, actor, action, wants, result, status, ip_hash, ua, latency_ms, details });
+          }
+          return { success: true };
+        },
+        async all() {
+          const limit = this.params[this.params.length - 1];
+          const kind = sql.includes("WHERE kind = ?") ? this.params[0] : null;
+          const out = rows.filter((r) => !kind || r.kind === kind).slice().reverse().slice(0, limit);
+          return { results: out };
+        },
+      };
+      return stmt;
+    },
+    _rows: rows,
+  };
+}
+
 function b64url(buf) {
   return Buffer.from(buf).toString("base64url");
 }
@@ -62,12 +94,17 @@ function check(name, ok, detail = "") {
 
 async function main() {
   const kv = makeKV();
+  const d1 = makeD1();
+  const pending = [];
+  const ctx = { waitUntil: (p) => pending.push(Promise.resolve(p).catch(() => {})) };
   // N3：測試用 master key（32 bytes → base64url）
   const MASTER = Buffer.from("0123456789abcdef0123456789abcdef").toString("base64url");
   const env = {
     BROKER_KV: kv,
     AGENT_TOKEN: ADMIN,
     BROKER_MASTER_KEY: MASTER,
+    AUDIT_DB: d1,
+    AGENT_TOKEN_PREV: "test-admin-token-prev",
     GITHUB_APP_ID: "123",
     GITHUB_APP_PEM_BASE64: "unused-in-contract-test",
   };
@@ -76,7 +113,7 @@ async function main() {
   const B = keypair();
 
   const call = async (path, init = {}) => {
-    const res = await worker.fetch(new Request(`https://broker.test${path}`, init), env);
+    const res = await worker.fetch(new Request(`https://broker.test${path}`, init), env, ctx);
     return res;
   };
   const jsonCall = (path, method, body, token) =>
@@ -216,7 +253,7 @@ async function main() {
     new Request("https://broker.test/github-token", {
       method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${ADMIN}` },
       body: JSON.stringify({ installation_id: 1 }),
-    }), legacyEnv);
+    }), legacyEnv, ctx);
   const legacyBody = await legacyRes.json();
   check("舊 flow 開啟但冇 repo allowlist → 403",
     legacyRes.status === 403 && legacyBody.error === "legacy_repo_allowlist_missing", `error=${legacyBody.error}`);
@@ -291,8 +328,76 @@ async function main() {
       method: "PUT",
       headers: { "content-type": "application/json", authorization: `Bearer ${ADMIN}` },
       body: JSON.stringify({ value: "x" }),
-    }), noKeyEnv);
+    }), noKeyEnv, ctx);
   check("未設 BROKER_MASTER_KEY → 存 secret 回 503", noKeyPut.status === 503, `status=${noKeyPut.status}`);
+
+  /* ================= N2 / N4 ================= */
+  await Promise.all(pending);
+  pending.length = 0;
+
+  /* 21. prev admin token 重疊期可用；錯 token 401 */
+  const prevAuth = await call("/v1/agents", { headers: { authorization: "Bearer test-admin-token-prev" } });
+  const badAuth = await call("/v1/agents", { headers: { authorization: "Bearer totally-wrong-token" } });
+  check("N2：prev admin token 仍可通過（輪替重疊期）", prevAuth.status === 200, `status=${prevAuth.status}`);
+  check("N2：錯 admin token → 401", badAuth.status === 401, `status=${badAuth.status}`);
+
+  /* 22. D1 audit：有 claim + admin 記錄、無 secret 明文、actor 有標記 */
+  await Promise.all(pending);
+  pending.length = 0;
+  const allRows = JSON.stringify(d1._rows);
+  check("N4：D1 有 claim 同 admin 記錄",
+    d1._rows.some((r) => r.kind === "claim") && d1._rows.some((r) => r.kind === "admin"),
+    `claim=${d1._rows.filter((r) => r.kind === "claim").length} admin=${d1._rows.filter((r) => r.kind === "admin").length}`);
+  check("N4：D1 內無 secret 明文",
+    !allRows.includes("s3cr3t-value") && !allRows.includes("legacy-plaintext-value"),
+    `rows=${d1._rows.length}`);
+  check("N4：admin 寫操作帶 actor + action",
+    d1._rows.some((r) => r.actor === "admin:current" && r.action === "secret_put"),
+    "搵 secret_put / admin:current");
+  check("N4：IP 只存 hash（唔存原文）",
+    d1._rows.every((r) => r.ip_hash === null || /^[0-9a-f]{16}$/.test(r.ip_hash)), "ip_hash 格式");
+
+  /* 23. GET /v1/admin/audit 需要 admin；有 D1 就回 rows */
+  const auditRead = await jsonCall("/v1/admin/audit?limit=5", "GET", undefined, ADMIN);
+  const auditBody = await auditRead.json();
+  const auditNoAuth = await call("/v1/admin/audit?limit=5");
+  check("N4：GET /v1/admin/audit 回 rows（admin）",
+    auditRead.status === 200 && Array.isArray(auditBody.rows) && auditBody.rows.length > 0,
+    `status=${auditRead.status} rows=${auditBody.rows ? auditBody.rows.length : "n/a"}`);
+  check("N4：audit 讀取無 admin → 401", auditNoAuth.status === 401, `status=${auditNoAuth.status}`);
+
+  /* 24. claim 限流（CLAIM_RATE_LIMIT=2 → 第 3 次 429 + Retry-After） */
+  const rateAgent = "ct-rate";
+  await jsonCall(`/v1/agents/${rateAgent}`, "PUT", { pubkey: A.rawPub, entitlements: ["rate.key"] }, ADMIN);
+  await jsonCall(`/v1/secrets/${rateAgent}/rate.key`, "PUT", { value: "rate-value" }, ADMIN);
+  const envRl = { ...env, CLAIM_RATE_LIMIT: "2" };
+  const rlCall = (nonce) => {
+    const ts = Math.floor(Date.now() / 1000);
+    return worker.fetch(
+      new Request("https://broker.test/v1/claim", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          agent_id: rateAgent, wants: ["rate.key"], ts, nonce,
+          sig: sign(A.privateKey, rateAgent, ["rate.key"], ts, nonce),
+        }),
+      }),
+      envRl,
+      ctx,
+    );
+  };
+  const r1 = await rlCall("noncerate001");
+  const r2 = await rlCall("noncerate002");
+  const r3 = await rlCall("noncerate003");
+  const r3Body = await r3.json();
+  check("N2：claim 限流（前 2 次 200、第 3 次 429）",
+    r1.status === 200 && r2.status === 200 && r3.status === 429, `${r1.status} ${r2.status} ${r3.status}`);
+  check("N2：429 帶 Retry-After + retry_after + no-store",
+    r3.headers.get("retry-after") !== null && typeof r3Body.retry_after === "number" &&
+      r3.headers.get("cache-control") === "no-store",
+    `retry-after=${r3.headers.get("retry-after")}`);
+
+  await Promise.all(pending);
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} PASS${failed.length ? `，${failed.length} FAIL` : ""}`);

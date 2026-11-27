@@ -13,3 +13,9 @@ enabled = true
 [[kv_namespaces]]
 binding = "BROKER_KV"
 id = "dd244113e11148c883325bc4d3cfde3c"
+
+# N4：audit log（D1）
+[[d1_databases]]
+binding = "AUDIT_DB"
+database_name = "broker-audit"
+database_id = "efa0cc0d-b2f7-43a1-9317-63f8b737df92"

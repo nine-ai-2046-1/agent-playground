@@ -150,6 +150,7 @@ secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其�
 | `ts` 超出 ±60s | `401 stale_or_skewed_timestamp`（時間類錯誤會講原因，方便校時） |
 | nonce 重用 | `409 replay_detected` |
 | 未在 `entitlements` | `403 not_entitled`（列出 `denied`） |
+| 超過限流（默認 40 次／分鐘／agent+IP） | `429 rate_limited` + `Retry-After`、`retry_after` |
 
 ### 管理 API（`Authorization: Bearer <admin token>`）
 
@@ -162,6 +163,7 @@ secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其�
 | `PUT /v1/secrets/:agentId/:name` | 存靜態 secret（`{"value":"…"}`）；**落 KV 前自動信封加密** |
 | `DELETE /v1/secrets/:agentId/:name` | 刪靜態 secret |
 | `POST /v1/admin/reencrypt` | 把舊明文 `sec:*` 就地遷移成密文（回 `{migrated, already_encrypted, failed}`） |
+| `GET /v1/admin/audit?limit=50&kind=claim\|admin` | 讀 D1 審計記錄（預設 50，最多 200） |
 
 ### 舊相容 endpoint（默認已下架）
 
@@ -181,6 +183,57 @@ npx wrangler secret put LEGACY_REPOSITORIES     # 例：agent-playground（必�
 | `agent:<id>` | `{id, pubkey, status, entitlements, github{…}, created_at, updated_at}` |
 | `sec:<agent>:<name>` | 信封加密後嘅 JSON：`{v:1, alg:"A256GCM", iv, ct}`（AAD 綁 `<agent>:<name>`；KV 內**無明文**）|
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s（重放保護）|
+
+## 限流（N2）
+
+固定窗（KV 計數，60s 視窗），超限即 `429` + `Retry-After: <秒>`：
+
+| 桶 | 默認 | 覆寫 secret | key |
+| :-- | :-- | :-- | :-- |
+| claim | 40/min | `CLAIM_RATE_LIMIT` | agent + IP |
+| admin 寫入 | 60/min | `ADMIN_RATE_LIMIT` | IP |
+| audit 讀取 | 30/min | `AUDIT_RATE_LIMIT` | IP |
+
+```bash
+wrangler secret put CLAIM_RATE_LIMIT   # 例：20
+```
+
+> 限流係 best-effort：KV 最終一致，多 colo 之間可能有少量超額，用嚟擋失控 loop，唔係 DDoS 防護（邊緣層仍建議 Access／WAF）。
+
+## Admin token 輪替（N2）
+
+Worker 同時接受 `AGENT_TOKEN`（current）與 `AGENT_TOKEN_PREV`（舊）。零停機流程：
+
+```bash
+# 1. 舊 token 降為 prev（此時兩條都通）
+wrangler secret put AGENT_TOKEN_PREV   # 貼入現用 token
+
+# 2. 換新 current
+node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))' > ~/Doubao/secrets/broker-admin-token
+wrangler secret put AGENT_TOKEN < ~/Doubao/secrets/broker-admin-token
+
+# 3. 全客戶端換完（建議觀察 24h）後，刪 prev
+wrangler secret delete AGENT_TOKEN_PREV
+```
+
+`GET /v1/admin/audit` 的 `actor` 會寫 `admin:current` / `admin:prev`，可直接睇邊個仲用舊 token。
+
+## 審計（N4）
+
+每次 claim 同每次 admin 寫操作（agent put/delete、secret put/delete、reencrypt）都會寫：
+
+| 去邊 | 內容 |
+| :-- | :-- |
+| Cloudflare log（console JSON） | 全量，供 `wrangler tail` / Logpush |
+| D1 `broker-audit.audit` | `ts, kind, actor, action, agent_id, outcome, ip_hash, detail` |
+
+設計約束：
+
+- **永不記 secret 值**（只記 name / 長度 / 結果）
+- IP 只存 `SHA-256(CF-Connecting-IP)` 前 16 hex，唔存原文
+- 寫入用 `ctx.waitUntil`，D1 掛咗都唔會拖死 claim（只記 `audit:write_failed` 落 console）
+- 查：`GET /v1/admin/audit?limit=50` 或
+  `wrangler d1 execute broker-audit --remote --command "SELECT ts,kind,action,outcome FROM audit ORDER BY ts DESC LIMIT 20"`
 
 ## 靜態 secret 加密（N3）
 
@@ -221,7 +274,7 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 ## 已知限制
 
 1. **Cloudflare Access 未開**：Zero Trust Free 要綁信用卡（$0 但要授權超額收費），所以邊緣層未有 Access Service Token；現時保護全靠 Worker 內簽名驗證。
-2. 公鑰 registry 靠 admin token 寫入；admin token 仍係單一共享 secret（只作登記用，唔參與每次 claim）。admin token 輪替屬 N2，未做。
+2. 公鑰 registry 靠 admin token 寫入（只作登記／管理用，唔參與每次 claim）。已支援雙 token 重疊輪替（見上節），但實務上仍係共享 secret：建議每季度輪替一次並收緊 `AGENT_TOKEN_PREV` 生命週期。
 3. **Master key 單點**：`BROKER_MASTER_KEY` 只存喺 Worker secret 同本機 `~/Doubao/secrets/broker-master-key.b64`（600）。遺失即解唔到舊 secret（要重新 `secret-put`）；輪替要保留舊 key 做解密（kid 欄位已預留但未多 key）。
 4. `wants` 最多 12 項，`repositories` 最多 20 個。
 5. 舊 bearer endpoint 仍然存在，文件齊備後應下架。
@@ -240,4 +293,4 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 | `agents/TECH.md` | 接手的 developer agent | 架構、API 契約、KV 模型、部署／發版／測試 playbook、已知陷阱 |
 | `agents/AUDIT.md` | audit agent | 宣稱清單、控制清單、風險登記冊（P0–P2）、audit playbook、測試案例、證據要求 |
 
-審核基線（2026-11-27 修復後）：Worker 版本 `82bbb354`、CLI `0.4.0`、生產 registry 只有 `opencode-01`、Access 未開。
+審核基線（2026-11-27 N2+N4 後）：Worker 版本 `207a66f2`、CLI `0.4.0`、契約測試 30/30、D1 `broker-audit` 已上線、生產 registry 有 `opencode-01` + `ci-e2e-01`、Access 未開。
