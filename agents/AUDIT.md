@@ -277,7 +277,7 @@ audit/<YYYY-MM-DD>/
 
 | # | 項目 | 為何未修 | 下一步 |
 | :-- | :-- | :-- | :-- |
-| N1 | GitHub App installation = all（82 repo） | 要 repo owner 在 GitHub App 設定改；installation token 無權改自己範圍 | 你喺 App 頁面「Configure」改為 only `agent-playground`，或另建只讀 App |
+| N1 | GitHub App installation = all（82 repo） | **用戶 2026-11-27 決定：唔改，接受風險**（已知 installation token 可及 82 repo；改動需 App 設定頁） | 已記錄為 accepted risk，不再跟進 |
 | N2 | Admin token 單點、無 rotation／rate limit | 屬設計改動（S10 級） | 建議下一步：admin 也走 Ed25519 + 雙 token 輪替 |
 | N3 | 靜態 secret 原文存 KV | 需 envelope encryption 設計 | Roadmap 第 1 項 |
 | N4 | audit log 只 console.log | 需 D1／R2 或 Logpush | Roadmap 第 6 項 |
