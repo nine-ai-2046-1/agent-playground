@@ -164,10 +164,10 @@ base = os.environ.get("AZURE_OPENAI_ENDPOINT")  # 有就自動有
 ```bash
 # A. 一鍵（推薦；private repo 需要只讀 token：fine-grained PAT 只勾 Contents:Read，或 GitHub App installation token）
 read -rsp 'GitHub read token: ' GH_TOKEN && echo
-GH_TOKEN="$GH_TOKEN" bash scripts-bootstrap-install.sh            # 預設 pin v0.4.0
+GH_TOKEN="$GH_TOKEN" bash scripts-bootstrap-install.sh            # 預設 pin v0.5.0
 
 # 想 pin 其他已發佈版本：
-GH_TOKEN="$GH_TOKEN" REL_TAG=v0.4.0 bash scripts-bootstrap-install.sh
+GH_TOKEN="$GH_TOKEN" REL_TAG=v0.5.0 bash scripts-bootstrap-install.sh
 
 # B. 已經手動 clone 落機（完全離線，唔需要 token）
 bash ~/src/agent-playground/scripts-bootstrap-install.sh --dir ~/src/agent-playground

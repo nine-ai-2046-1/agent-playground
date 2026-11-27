@@ -97,7 +97,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | 安裝安全 | `scripts-bootstrap-install.sh` | token 走 `GIT_ASKPASS`，唔入 argv；`GIT_TERMINAL_PROMPT=0` |
 | Secret 不入 repo | `.gitignore`（`.dev.vars`、`*.pem`、`*.base64.txt`）| 已掃過全 git 歷史：零 PEM／零 token 真值 |
 | 可重跑契約測試 | `worker/scripts/contract-test.mjs` | 30 項，自帶 mock KV + mock D1，無需 wrangler／網絡；CI 可直接跑 |
-| 安裝 pin + checksum | `scripts-bootstrap-install.sh` + Release `v0.4.0` | 默認抓 release tarball 並驗 `.sha256` + 版本核對；`--from-git` 為應急 |
+| 安裝 pin + checksum | `scripts-bootstrap-install.sh` + Release `v0.5.0` | 默認抓 release tarball 並驗 `.sha256` + 版本核對；`--from-git` 為應急 |
 | argv 洩漏防線 | CLI 已冇任何寫入指令；secret 只經 stdin／env／Keychain | 密文由本機 `scripts/secret-envelope.mjs` 產生 |
 
 ---
@@ -123,7 +123,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | R6 | **冇 rate limit／abuse 偵測** | **部分緩解（N2）**：claim 40/min per agent+IP、admin 60/min、audit 30/min，429 有 `Retry-After`。未做告警／異常偵測 | 加告警（429 突增、多 IP 同 agent）；KV 最終一致，跨 colo 可能超額 |
 | R7 | **Audit log 只有 `console.log`** | **已修（N4／N7）**：claim 落 D1 `audit`（加 `machine_id`），用 wrangler／SQL 查。仍未做告警／Logpush／append-only 保證 | 加 Logpush；D1 只留 Worker 寫權限 |
 | R8 | **Agent 自身可被騎劫（prompt injection）** | broker 保證「有權才拿到」，唔保證「拿到後唔漏」 | egress 白名單、log 掃描、secret 只在子進程 env |
-| R9 | **CLI 安裝管道跟 HEAD** | **已修（N5）**：默認安裝 Release `v0.4.0` tarball 並驗 `.sha256` + 版本；`--from-git` 只作應急 | 可再加 minisign／固定 digest 白名單 |
+| R9 | **CLI 安裝管道跟 HEAD** | **已修（N5）**：默認安裝 Release `v0.5.0` tarball 並驗 `.sha256` + 版本；`--from-git` 只作應急 | 可再加 minisign／固定 digest 白名單 |
 
 ### P2（環境與衛生）
 
@@ -288,7 +288,7 @@ audit/<YYYY-MM-DD>/
 | N2 | Admin token 單點、無 rotation／rate limit | ✅ **已消除（N7）**：admin API 全撤、共享 token 刪除、claim 限流保留 | 部署後確認 `/v1/admin/*` 404、secrets 內無 `AGENT_TOKEN*` |
 | N3 | 靜態 secret 原文存 KV | ✅ **已修（2026-11-27）**：AES-256-GCM 信封加密（AAD 綁 agent+name），KV 只存 `{v,alg,iv,ct}`；未設 key 寫入 503（fail closed）；舊明文可讀；遷移改用 `scripts/secret-envelope.mjs`；契約測試 22/22 | 生產 `BROKER_MASTER_KEY` 已上（worker `540987ca`） |
 | N4 | audit log 只 console.log | 需 D1／R2 或 Logpush | Roadmap 第 6 項 |
-| N5 | CLI 安裝仍可跟 HEAD | ✅ **已修（2026-11-27）**：`scripts-bootstrap-install.sh` 預設走 release `v0.4.0` tarball，下載 `.sha256` 驗證後才 `npm i -g`，並核對 `broker --version` 同 tag 一致；`--from-git` 只在應急用；CI 每次跑都實測 release 安裝路徑 | 實測：private repo 嘅 `releases/download` URL 回 404，已改 API asset URL |
+| N5 | CLI 安裝仍可跟 HEAD | ✅ **已修（2026-11-27）**：`scripts-bootstrap-install.sh` 預設走 release `v0.5.0` tarball，下載 `.sha256` 驗證後才 `npm i -g`，並核對 `broker --version` 同 tag 一致；`--from-git` 只在應急用；CI 每次跑都實測 release 安裝路徑 | 實測：private repo 嘅 `releases/download` URL 回 404，已改 API asset URL |
 | N6 | 本機殘留 `.dev.vars`／`~/Downloads/*.pem` | ✅ **已完成（2026-11-27）**：App PEM（原 644）已搬去 `~/Doubao/secrets/baobao2046.app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；`.dev.vars` 600 只留本機 dev 用 | master key 亦存 `~/Doubao/secrets/broker-master-key.b64`（600） |
 
 ### 此批次的新基線
