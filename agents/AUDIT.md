@@ -289,3 +289,27 @@ audit/<YYYY-MM-DD>/
 - CLI：`0.4.0`（未發布到任何 registry；由 repo tarball 安裝）
 - Worker：已部署 `82bbb354-7aa6-4516-807e-77f4dc24aad1`（契約變更：no-store 全覆蓋、舊 endpoint 默認 404）
 - 契約測試：16/16 PASS（本地 mock KV；生產仍未實跑，見 O1）
+
+### F10 — 跨平台實測（Linux 雲主機，2026-11-27）
+
+詳見 `audit/2026-11-27/VM-TEST.md`（22 項）。要點：
+
+| 項 | 結果 |
+| :-- | :-- |
+| 契約測試（Linux） | 16/16 PASS |
+| 退出碼契約（無參／缺參／未知指令／未知 flag） | 全部 exit **2** |
+| 私鑰存放（非 macOS） | `~/.config/secret-broker/keys/<agent>.pkcs8`，600；目錄 700 |
+| E2E（本地 wrangler dev `--local`，dummy secret） | init→register→secret-put(stdin)→claim(遮罩/`--print`/`--env`)→exec 注入，全通 |
+| 反面 | 未授權 403 exit 4；重放 409；錯簽 401；舊 `/github-token` 404；管理 API 無 bearer 401 |
+| audit log | 有 `result=ok/partial/not_entitled/failed/replay`，**secret 值 0 次出現** |
+| 生產 E2E（雲機） | ❌ 出口 proxy→workers.dev 503（`remote_ip=199.193.116.105`），硬指 Cloudflare IP 亦 503 |
+
+**Linux 新增低嚴重度（未修）**
+
+| ID | 問題 | 建議 |
+| :-- | :-- | :-- |
+| L-1 | 單 key 全失敗回 **500**（`github_not_configured` 實為設定缺失） | 改 503，令 CLI／上層可分辨「設定缺失」vs「真故障」 |
+| L-2 | `claim --print` 輸出係 JSON（同 `--json` 幾乎相同），非純值 | 文件寫清或改純值 |
+| L-3 | 非 macOS 冇 `admin-login` 持久化（每次要 export `BROKER_ADMIN_TOKEN`） | 可加 `~/.config/secret-broker/admin.token`（600） |
+
+**仍未做的環境**：Lima VM 未安裝（本機冇 `limactl`；OrbStack daemon 未起）。雲主機已提供乾淨 Linux，故未重複搭建。

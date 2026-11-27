@@ -500,7 +500,7 @@ function usage() {
   console.log(`broker — per-agent Secret Broker CLI (v${readCliVersion()})
 
 用法:
-  broker init --agent <id> [--broker-url <url>] [--force]      建立 agent 身份（Ed25519，私鑰入 Keychain）
+  broker init --agent <id> [--broker-url <url>] [--force]      建立 agent 身份（Ed25519；macOS→Keychain，Linux→600 檔）
   broker whoami [--agent <id>]                                 顯示本機身份
   broker pubkey [--agent <id>]                                 由私鑰推導公鑰（register 用，唔需要抄）
   broker health                                                檢查 broker

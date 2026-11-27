@@ -67,7 +67,7 @@ broker whoami
 ## 快速開始
 
 ```bash
-# 1. 建立 agent 身份（生成 Ed25519 keypair，私鑰入 Keychain）
+# 1. 建立 agent 身份（生成 Ed25519 keypair；macOS 入 Keychain，Linux 寫 ~/.config/secret-broker/keys/*.pkcs8 600）
 broker init --agent opencode-01
 
 # 2. 登記（admin 權限；公鑰自動由本機私鑰推導，唔需要抄）

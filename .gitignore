@@ -14,3 +14,4 @@ pem.base64.txt
 
 # wrangler
 .wrangler/
+*.tgz
