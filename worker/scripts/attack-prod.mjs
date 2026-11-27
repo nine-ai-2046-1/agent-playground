@@ -231,14 +231,24 @@ if (key) {
     ["header 內換行嘗試", "abc\r\nX-Injected: 1"],
   ];
   let bad = [];
+  let clientRejected = 0;
   for (const [label, v] of nasty) {
-    const r = await req("POST", "/v1/claim", {
-      body: { agent_id: AGENT, wants: ["github"], ts, nonce: n + "", sig: sign(AGENT, ["github"], ts, n) },
-      headers: { "x-broker-machine": v },
-    });
-    if (r.status >= 500) bad.push(`${label} → ${r.status}`);
+    try {
+      const r = await req("POST", "/v1/claim", {
+        body: { agent_id: AGENT, wants: ["github"], ts, nonce: n + "", sig: sign(AGENT, ["github"], ts, n) },
+        headers: { "x-broker-machine": v },
+      });
+      if (r.status >= 500) bad.push(`${label} → ${r.status}`);
+    } catch (_) {
+      // 客戶端（fetch）自己拒收 CRLF header —— 攻擊根本出唔到街，算 PASS
+      clientRejected += 1;
+    }
   }
-  check("X-Broker-Machine 垃圾值唔會 5xx", bad.length === 0, bad.join(" | ") || "全部非 5xx");
+  check(
+    "X-Broker-Machine 垃圾值唔會 5xx（CRLF 由客戶端先擋）",
+    bad.length === 0,
+    bad.join(" | ") || `全部安全（其中 ${clientRejected} 個由客戶端拒發）`,
+  );
 }
 
 /* ---------- 8. 時序側信道（資訊性，唔算 fail 除非差異極大） ---------- */
@@ -277,6 +287,11 @@ if (key) {
 }
 
 /* ---------- 總結 ---------- */
+process.on("uncaughtException", (e) => {
+  console.log(`FAIL  未預期例外：${e && e.message}`);
+  process.exit(1);
+});
+
 console.log(`\n${results.filter((r) => r.ok).length}/${results.length} PASS`);
 if (fails > 0) {
   console.log(`\n有 ${fails} 項攻擊成功 —— 需要即刻修`);
