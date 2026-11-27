@@ -416,8 +416,8 @@ Cloudflare KV 對同一個 key 有「每秒 1 次寫入」上限，密集 claim 
 | 情況 | 你見到 | 系統做咗乜 |
 | :-- | :-- | :-- |
 | D1 寫唔到（罕見） | 正常派 key 或 429 | 退 KV → 內存，逐級降級，log 記 `rate_limit_d1_failed`（唔會 500） |
-| 重放 nonce 寫唔到 | `503 kv_unavailable` + `Retry-After: 5` | 寧願唔派（fail-closed），避免重放 |
-| 短時間超過 40 次／分鐘 | `429 rate_limited` + `Retry-After` | 正常限流 |
+| 重放 nonce | 正常（唔會 503） | **D1 唯一鍵**（`INSERT OR IGNORE … RETURNING`）判定；只有 D1 都唔可用時才退 KV，KV 寫唔到就 `503 kv_unavailable` fail-closed |
+| 短時間超過 40 次／分鐘 | `429 rate_limited` + `Retry-After` | 正常限流（D1 跨窗計數，實測第 41 發觸發） |
 
 > 所以「一個 script 用一次 `exec` 包住」既係效率，亦係避免撞限流。
 
