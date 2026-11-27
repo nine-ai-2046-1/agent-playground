@@ -30,8 +30,9 @@ if [ -z "$DIR" ]; then
   [ -n "${GH_TOKEN:-}" ] || { echo "需要 GH_TOKEN（只讀 token）或 --dir" >&2; exit 1; }
   ASKPASS="$TMP/.askpass"
   printf '#!/bin/sh\necho "$GH_TOKEN"\n' > "$ASKPASS"; chmod 700 "$ASKPASS"
-  GIT_ASKPASS="$ASKPASS" git clone --depth 1 --branch "$REF" \
-    "${REPO_URL/https:\/\//https:\/\/x-access-token@}" "$TMP/cli" >&2
+  AUTH_URL="$(printf '%s' "$REPO_URL" | sed 's|https://|https://x-access-token@|')"
+  GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$REF" \
+    "$AUTH_URL" "$TMP/cli" >&2
   DIR="$TMP/cli"
 fi
 
