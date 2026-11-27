@@ -24,6 +24,8 @@ const TS_WINDOW_SECONDS = 60; // 簽名時間窗 ±60s
 const NONCE_TTL_SECONDS = 120; // 重放保護保留時間
 const MAX_WANTS = 12;
 const AGENT_ID_RE = /^[a-z0-9][a-z0-9._-]{1,47}$/; // 2–48 字元，細寫
+// 等時處理用：固定 dummy 公鑰（32 bytes 全 0），令「agent 唔存在」都做一次同樣嘅 verify
+const DUMMY_PUBKEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const NONCE_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 /** base64 -> ArrayBuffer（純 binary，唔經 UTF-8，避免 0x80+ byte 被改） */
@@ -358,6 +360,19 @@ function rateConf(env, scope) {
   return { ...base, limit: Number.isFinite(override) && override > 0 ? override : base.limit };
 }
 
+/** KV 寫唔到時嘅同 isolate 內存兜底（防止突發時限流完全失效） */
+const LOCAL_RL = new Map();
+const LOCAL_RL_MAX = 4096;
+
+function bumpLocalRate(scope, subject, windowKey, limit) {
+  const key = `${scope}:${subject}:${windowKey}`;
+  if (LOCAL_RL.size > LOCAL_RL_MAX) LOCAL_RL.clear(); // 粗暴但夠用；isolate 隨時回收
+  const used = Number(LOCAL_RL.get(key) || 0);
+  if (used >= limit) return { allowed: false, used, limit, retryAfter: null, local: true };
+  LOCAL_RL.set(key, used + 1);
+  return { allowed: true, used: used + 1, limit, local: true };
+}
+
 async function bumpRate(env, scope, subject) {
   const conf = rateConf(env, scope);
   const now = Math.floor(Date.now() / 1000);
@@ -379,7 +394,9 @@ async function bumpRate(env, scope, subject) {
       reason: String((error && error.message) || error).slice(0, 80),
       ts: new Date().toISOString(),
     }));
-    return { allowed: true, used, limit: conf.limit, degraded: true };
+    // 降級：改用同 isolate 內存計數，仍然大概守得住 40/min
+    const local = bumpLocalRate(scope, subject, String(win), conf.limit);
+    return { ...local, degraded: true, retryAfter: local.retryAfter ?? conf.window - (now % conf.window) };
   }
   return { allowed: true, used: used + 1, limit: conf.limit };
 }
@@ -480,6 +497,18 @@ export default {
       const agent = await getAgent(env, agentId);
       // 唔分開講「唔存在」定「簽名錯」，避免枚舉 agent id
       if (!agent || agent.status !== "active" || !agent.pubkey) {
+        // 等時處理：用 dummy 公鑰做一次同款 verify，令「唔存在」同「簽名錯」延遲接近
+        try {
+          const dummy = await importEd25519PublicKey(DUMMY_PUBKEY);
+          await crypto.subtle.verify(
+            { name: dummy.algorithm.name },
+            dummy,
+            fromBase64Url(sig),
+            new TextEncoder().encode(canonicalPayload(agentId, wants, ts, nonce)),
+          );
+        } catch (_) {
+          /* 預期會失敗／拋錯；目的只係消耗同一個時間量 */
+        }
         audit(request, env, ctx, { agent_id: agentId, wants, result: "unknown_agent", status: 401 });
         return finish(new Response("Unauthorized", { status: 401 }));
       }

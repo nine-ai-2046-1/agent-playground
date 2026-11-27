@@ -373,6 +373,24 @@ async function main() {
         check("503 帶 kv_unavailable + Retry-After", body.error === "kv_unavailable" && res.headers.get("retry-after") === "5", `retry-after=${res.headers.get("retry-after")}`);
       } else {
         check("降級時仍然派到 secret", body?.secrets?.["demo.key"]?.value === "v", "fail-open 只影響限流計數");
+        // KV 寫唔到 → 內存兜底仍然要數到 40 就 429
+        let hit429 = false;
+        for (let i = 0; i < 45 && !hit429; i += 1) {
+          const ts = Math.floor(Date.now() / 1000);
+          const n2 = crypto.randomBytes(16).toString("base64url");
+          const r = await fetchHandler(
+            new Request("https://broker.test/v1/claim", {
+              method: "POST",
+              headers: { "content-type": "application/json", "x-broker-machine": MACHINE },
+              body: JSON.stringify({ agent_id: agent, wants: ["demo.key"], ts, nonce: n2, sig: sign(kp.privateKey, agent, ["demo.key"], ts, n2) }),
+            }),
+            envX,
+            ctx,
+          );
+          if (r.status === 429) hit429 = true;
+          if (r.status >= 500) break;
+        }
+        check("KV 降級時內存兜底仍然會 429（唔會無限放行）", hit429, hit429 ? "已觸發" : "45 次都冇 429");
       }
     }
   }
