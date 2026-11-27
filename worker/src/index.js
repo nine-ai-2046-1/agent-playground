@@ -386,32 +386,66 @@ function bumpLocalRate(scope, subject, windowKey, limit) {
   return { allowed: true, used: used + 1, limit, local: true };
 }
 
-async function bumpRate(env, scope, subject) {
-  const conf = rateConf(env, scope);
-  const now = Math.floor(Date.now() / 1000);
-  const win = Math.floor(now / conf.window);
+/**
+ * 權威計數：D1（單一寫入點，跨 isolate 一致）。
+ * KV 版只做 backup（冇 D1 binding 或者 D1 掛咗時）。
+ */
+async function bumpD1Rate(env, scope, subject, win, conf, now) {
+  const row = await env.AUDIT_DB.prepare(
+    "INSERT INTO rate_limit (scope, subject, window, used) VALUES (?1, ?2, ?3, 1) " +
+      "ON CONFLICT (scope, subject, window) DO UPDATE SET used = used + 1 RETURNING used",
+  )
+    .bind(scope, subject, win)
+    .first();
+  const used = Number((row && row.used) || 1);
+  if (used > conf.limit) {
+    return { allowed: false, used, limit: conf.limit, retryAfter: conf.window - (now % conf.window), source: "d1" };
+  }
+  return { allowed: true, used, limit: conf.limit, source: "d1" };
+}
+
+async function bumpKvRate(env, scope, subject, win, conf, now) {
   const key = `rl:${scope}:${subject}:${win}`;
   const raw = await env.BROKER_KV.get(key, "text");
   const used = Number(raw || "0");
   if (used >= conf.limit) {
-    return { allowed: false, used, limit: conf.limit, retryAfter: conf.window - (now % conf.window) };
+    return { allowed: false, used, limit: conf.limit, retryAfter: conf.window - (now % conf.window), source: "kv" };
   }
   try {
     await env.BROKER_KV.put(key, String(used + 1), { expirationTtl: conf.window * 2 });
   } catch (error) {
     // KV 同一個 key 每秒只可寫一次；突發請求會撞寫入上限。
-    // 呢個係「用量控制」而唔係「認證」—— 寫唔到就降級放行，唔可以變 500。
+    // 呢個係「用量控制」而唔係「認證」—— 寫唔到唔可以變 500。
     console.log(JSON.stringify({
       event: "rate_limit_degraded",
       scope,
       reason: String((error && error.message) || error).slice(0, 80),
       ts: new Date().toISOString(),
     }));
-    // 降級：改用同 isolate 內存計數，仍然大概守得住 40/min
     const local = bumpLocalRate(scope, subject, String(win), conf.limit);
-    return { ...local, degraded: true, retryAfter: local.retryAfter ?? conf.window - (now % conf.window) };
+    return { ...local, degraded: true, retryAfter: local.retryAfter ?? conf.window - (now % conf.window), source: "memory" };
   }
-  return { allowed: true, used: used + 1, limit: conf.limit };
+  return { allowed: true, used: used + 1, limit: conf.limit, source: "kv" };
+}
+
+async function bumpRate(env, scope, subject) {
+  const conf = rateConf(env, scope);
+  const now = Math.floor(Date.now() / 1000);
+  const win = Math.floor(now / conf.window);
+  if (env.AUDIT_DB) {
+    try {
+      return await bumpD1Rate(env, scope, subject, win, conf, now);
+    } catch (error) {
+      // D1 寫唔到（罕見）：退返 KV → 內存，逐級降級，但一定唔會 500
+      console.log(JSON.stringify({
+        event: "rate_limit_d1_failed",
+        scope,
+        reason: String((error && error.message) || error).slice(0, 80),
+        ts: new Date().toISOString(),
+      }));
+    }
+  }
+  return bumpKvRate(env, scope, subject, win, conf, now);
 }
 
 export default {

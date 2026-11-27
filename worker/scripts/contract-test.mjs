@@ -57,8 +57,10 @@ function makeKV() {
 /* ---------------- mock D1 ---------------- */
 function makeD1() {
   const rows = [];
+  const rate = new Map(); // 模擬 D1 rate_limit 表（跨 isolate 共享）
   return {
     _rows: rows,
+    _rate: rate,
     prepare(sql) {
       const stmt = {
         params: [],
@@ -78,6 +80,15 @@ function makeD1() {
         },
         async all() {
           return { results: [] };
+        },
+        async first() {
+          if (sql.includes("INSERT INTO rate_limit")) {
+            const key = `${this.params[0]}|${this.params[1]}|${this.params[2]}`;
+            const used = Number(rate.get(key) || 0) + 1;
+            rate.set(key, used);
+            return { used };
+          }
+          return null;
         },
       };
       return stmt;
