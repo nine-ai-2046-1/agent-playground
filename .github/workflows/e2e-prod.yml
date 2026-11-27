@@ -65,6 +65,9 @@ jobs:
           npm i -g . --no-audit --no-fund
           broker --version
 
+      - name: 密封信封本機閉環（X25519：seal → claim → 本機解密）
+        run: node scripts/test-sealed.mjs
+
       - name: 退出碼契約（用法類錯一律 2）
         run: |
           set +e

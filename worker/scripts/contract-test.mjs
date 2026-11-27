@@ -141,7 +141,7 @@ async function main() {
         id,
         pubkey: kp.rawPub,
         status: "active",
-        entitlements: ["github", "smtp.password", "legacy.key", "ghost.key"],
+        entitlements: ["github", "smtp.password", "legacy.key", "ghost.key", "openai.api_key"],
         github: { installation_id: 185701417, repositories: ["agent-playground"] },
         created_at: new Date().toISOString(),
         ...extra,
@@ -271,6 +271,49 @@ async function main() {
     legacy.status === 200 && legacyBody.secrets?.["legacy.key"]?.value === "legacy-plaintext-value",
     `status=${legacy.status}`,
   );
+
+  /* 14. v2 密封信封（X25519）：Worker 必須原封不動交回，絕不解密 */
+  {
+    const recipient = crypto.generateKeyPairSync("x25519");
+    const eph = crypto.generateKeyPairSync("x25519");
+    const spki = eph.publicKey.export({ format: "der", type: "spki" });
+    const shared = crypto.diffieHellman({ privateKey: eph.privateKey, publicKey: recipient.publicKey });
+    const key = Buffer.from(
+      crypto.hkdfSync("sha256", shared, Buffer.from("broker|agent-a|openai.api_key"), Buffer.from("secret-broker-v2"), 32),
+    );
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    cipher.setAAD(Buffer.from("sec|agent-a|openai.api_key"));
+    const body = Buffer.concat([cipher.update(Buffer.from("sk-sealed-plain-9999")), cipher.final()]);
+    const ct = Buffer.concat([body, cipher.getAuthTag()]);
+    const sealedEnv = JSON.stringify({
+      v: 2,
+      alg: "X25519-A256GCM",
+      epk: Buffer.from(spki.subarray(spki.length - 32)).toString("base64url"),
+      iv: iv.toString("base64url"),
+      ct: ct.toString("base64url"),
+    });
+    await kv.put("sec:agent-a:openai.api_key", sealedEnv);
+    const sealedClaim = await claim(claimBody("agent-a", ["openai.api_key"], A, "nonce00000013"));
+    const sealedBody = await sealedClaim.json();
+    const text = JSON.stringify(sealedBody);
+    check(
+      "v2 密封：Worker 只回 sealed 原字串（零解密）",
+      sealedClaim.status === 200 && sealedBody.secrets?.["openai.api_key"]?.sealed === sealedEnv,
+      `status=${sealedClaim.status}`,
+    );
+    check(
+      "v2 密封：回應無數字明文、亦冇 value 欄",
+      !text.includes("sk-sealed-plain-9999") && sealedBody.secrets?.["openai.api_key"]?.value === undefined,
+      "no-plaintext",
+    );
+    check(
+      "v2 密封：Worker 回 e2e 標記",
+      sealedBody.secrets?.["openai.api_key"]?.e2e === true,
+      `e2e=${sealedBody.secrets?.["openai.api_key"]?.e2e}`,
+    );
+    await kv.delete("sec:agent-a:openai.api_key");
+  }
 
   /* 13. KV 內 sec:* 為密文信封 */
   const envRaw = await kv.get("sec:agent-a:smtp.password");

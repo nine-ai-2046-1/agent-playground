@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-const DEFAULT_BROKER_URL = "https://github-token-broker.baobao2046.workers.dev";
+const ENDPOINT_FILE_NAME = "endpoint";
 const CONFIG_DIR = path.join(os.homedir(), ".config", "secret-broker");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 const KEYS_DIR = path.join(CONFIG_DIR, "keys");
@@ -89,24 +89,66 @@ interface Config {
   agentId?: string;
 }
 
+/** endpoint 係「部機層級」設定：任何 folder 行 CLI 都讀同一個檔（600） */
+const ENDPOINT_FILE = path.join(CONFIG_DIR, ENDPOINT_FILE_NAME);
+
+function readEndpointFile(): string {
+  try {
+    return fs.readFileSync(ENDPOINT_FILE, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function writeEndpointFile(rawUrl: string) {
+  const url = normalizeEndpoint(rawUrl);
+  fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(ENDPOINT_FILE, `${url}\n`, { mode: 0o600 });
+}
+
+function normalizeEndpoint(rawUrl: string): string {
+  const url = String(rawUrl || "").trim().replace(/\/+$/, "");
+  if (!url) die("endpoint 唔可以空白", 2);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    die(`endpoint 唔係合法 URL：${url}`, 2);
+  }
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && /^(localhost|127\.0\.0\.1)$/.test(parsed.hostname))) {
+    die("endpoint 一定要 https（只有 localhost 可以用 http）", 2);
+  }
+  if (parsed.search || parsed.hash || parsed.username || parsed.password) die("endpoint 唔可以有 query／hash／帳密", 2);
+  return parsed.origin + parsed.pathname.replace(/\/+$/, "");
+}
+
 function readConfig(): Config {
-  let brokerUrl = DEFAULT_BROKER_URL;
   let agentId: string | undefined;
+  let legacyUrl = "";
   try {
     const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
-    brokerUrl = String(raw.brokerUrl || DEFAULT_BROKER_URL);
+    legacyUrl = raw.brokerUrl ? String(raw.brokerUrl) : "";
     agentId = raw.agentId ? String(raw.agentId) : undefined;
   } catch {
-    /* 未初始化：用預設 */
+    /* 未初始化 */
   }
-  // 環境變數優先，方便 CI／staging／本機 dev 唔改 config 就切 broker
-  if (process.env.BROKER_URL) brokerUrl = process.env.BROKER_URL;
-  return { brokerUrl: brokerUrl.replace(/\/+$/, ""), agentId };
+  const stored = readEndpointFile();
+  // 一次性遷移：舊版把 URL 寫死在 config.json → 搬去 endpoint 檔，之後 config 只存 agentId
+  if (!stored && legacyUrl) {
+    try {
+      writeEndpointFile(legacyUrl);
+    } catch {
+      /* 遷移失敗唔阻住，下面照用 legacyUrl */
+    }
+  }
+  // 優先次序：環境變數（CI／臨時） > 機器層級 endpoint 檔 > 舊 config
+  const brokerUrl = (process.env.BROKER_URL || stored || legacyUrl || "").replace(/\/+$/, "");
+  return { brokerUrl, agentId };
 }
 
 function writeConfig(config: Config) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(CONFIG_FILE, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(CONFIG_FILE, `${JSON.stringify({ agentId: config.agentId }, null, 2)}\n`, { mode: 0o600 });
 }
 
 function resolveAgent(config: Config, flags: Record<string, string | true>): string {
@@ -191,6 +233,77 @@ function derivePublicKey(agentId: string): string {
   const publicKey = crypto.createPublicKey(privateKey);
   const spki = publicKey.export({ type: "spki", format: "der" });
   return Buffer.from(spki.subarray(spki.length - 32)).toString("base64url");
+}
+
+/**
+ * 由同一條 Ed25519 私鑰確定性衍生 X25519 keypair（libsodium 同款做法）。
+ * 好處：唔需要新 storage／新 key 檔，舊 agent 即刻有；公鑰可以公開貼上 registry。
+ */
+function x25519FromEd25519(agent: string): { privateKey: crypto.KeyObject; pubB64u: string } {
+  const ed = loadPrivateKey(agent);
+  const jwk = ed.export({ format: "jwk" }) as { d?: string };
+  if (!jwk.d) throw new Error("ed25519_export_failed");
+  const digest = crypto.createHash("sha512").update(Buffer.from(jwk.d, "base64url")).digest();
+  const scalar = Buffer.from(digest.subarray(0, 32));
+  scalar[0] &= 248;
+  scalar[31] &= 127;
+  scalar[31] |= 64;
+  const privateKey = crypto.createPrivateKey({
+    key: Buffer.concat([X_PKCS8_PREFIX, scalar]),
+    format: "der",
+    type: "pkcs8",
+  });
+  const spki = crypto.createPublicKey(privateKey).export({ format: "der", type: "spki" });
+  return { privateKey, pubB64u: Buffer.from(spki.subarray(spki.length - 32)).toString("base64url") };
+}
+
+/* X25519 raw key 嘅 DER 前綴（RFC 8410）：PKCS#8 私有 / SPKI 公開 */
+const X_PKCS8_PREFIX = Buffer.from("302e020100300506032b656e04220420", "hex");
+const X_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
+
+function encPubkeyFor(agent: string): string {
+  return x25519FromEd25519(agent).pubB64u;
+}
+
+/** 解開 v2 密封信封（X25519 ECDH → HKDF → AES-256-GCM；AAD 綁 agent+name） */
+function openSealed(agent: string, name: string, envelope: string): string {
+  let env: { v?: number; alg?: string; epk?: string; iv?: string; ct?: string };
+  try {
+    env = JSON.parse(envelope);
+  } catch {
+    die(`secret「${name}」信封格式壞咗（唔係 JSON）`, 1);
+  }
+  if (!env || env.v !== 2 || env.alg !== "X25519-A256GCM" || !env.epk || !env.iv || !env.ct) {
+    die(`secret「${name}」唔係 v2 密封信封（可能係舊格式，需要重新 seal）`, 1);
+  }
+  const { privateKey } = x25519FromEd25519(agent);
+  const eph = crypto.createPublicKey({
+    key: Buffer.concat([X_SPKI_PREFIX, Buffer.from(String(env.epk), "base64url")]),
+    format: "der",
+    type: "spki",
+  });
+  const shared = crypto.diffieHellman({ privateKey, publicKey: eph });
+  const key = Buffer.from(crypto.hkdfSync("sha256", shared, Buffer.from(`broker|${agent}|${name}`), Buffer.from("secret-broker-v2"), 32));
+  const raw = Buffer.from(String(env.ct), "base64url");
+  const tag = raw.subarray(raw.length - 16);
+  const body = raw.subarray(0, raw.length - 16);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(String(env.iv), "base64url"));
+  decipher.setAAD(Buffer.from(`sec|${agent}|${name}`));
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
+}
+
+/** claim 回應內 sealed 欄位 → 本機解密成 value（Worker 由頭到尾冇明文） */
+function hydrateSealedSecrets(agent: string, response: ClaimResponse): void {
+  for (const [name, entry] of Object.entries(response.secrets || {})) {
+    if (entry && typeof (entry as { sealed?: unknown }).sealed === "string") {
+      const sealed = String((entry as { sealed: string }).sealed);
+      (entry as Record<string, unknown>).value = openSealed(agent, name, sealed);
+      delete (entry as Record<string, unknown>).sealed;
+      (entry as Record<string, unknown>).encrypted = true;
+      (entry as Record<string, unknown>).e2e = true;
+    }
+  }
 }
 
 function signPayload(agentId: string, wants: string[], ts: number, nonce: string): string {
@@ -282,7 +395,9 @@ function cmdInit(flags: Record<string, string | true>) {
   if (!/^[a-z0-9][a-z0-9._-]{1,47}$/.test(agentId)) usageDie("agent id 只可以用細寫英數、. _ -，2–48 字元");
 
   const config = readConfig();
-  const brokerUrl = (flagString(flags, "broker-url") || config.brokerUrl).replace(/\/+$/, "");
+  const flagUrl = flagString(flags, "broker-url");
+  if (flagUrl) writeEndpointFile(flagUrl);
+  const brokerUrl = readConfig().brokerUrl;
   const existing = envPrivateKey() || (isMac ? keychainLoad(agentId) : readFileQuiet(fileKeyPath(agentId)));
   if (existing && !flags.force) die(`agent「${agentId}」已有私鑰；如要換新，加 --force（舊公鑰會即刻失效）`);
 
@@ -292,11 +407,18 @@ function cmdInit(flags: Record<string, string | true>) {
 
   console.log(`✔ agent「${agentId}」身份已建立`);
   console.log(`  私鑰存放：${where}（永不經網絡傳出）`);
-  console.log(`  公鑰（base64url，貼上 registry 用）：\n  ${rawPublic}`);
-  console.log(`\n下一步（admin token 執行，登記公鑰）：`);
-  console.log(
-    `  broker register --agent ${agentId} --pubkey ${rawPublic} --entitlements github --installation-id 185701417\n`,
-  );
+  console.log(`  簽名公鑰（貼上 registry）：\n  ${rawPublic}`);
+  console.log(`  密封公鑰（貼上 registry，用嚟加密 secret）：\n  ${encPubkeyFor(agentId)}`);
+  if (!brokerUrl) {
+    console.log(`\n⚠ 未設定 broker endpoint（默認冇 endpoint，唔會偷偷連任何網址）`);
+    console.log(`  先設定一次（部機層級，任何 folder 通用）：`);
+    console.log(`    broker endpoint set https://<worker>.workers.dev`);
+  } else {
+    console.log(`\nendpoint：${brokerUrl}`);
+  }
+  console.log(`\n下一步（Cloudflare 帳號持有人登記）：`);
+  console.log(`  broker ask-register --agent ${agentId} --entitlements github --installation-id <id>`);
+  console.log(`  跟住照印出嘅 wrangler 指令寫入 KV（CLI 本身冇寫入能力）\n`);
 }
 
 function cmdWhoami(config: Config, flags: Record<string, string | true>) {
@@ -309,6 +431,39 @@ function cmdWhoami(config: Config, flags: Record<string, string | true>) {
   console.log(`private : ${hasKey ? "✔ 已存在（" + where + "）" : "✖ 未建立"}`);
 }
 
+function cmdEndpoint(config: Config, flags: Record<string, string | true>, args: string[]) {
+  const action = args[0] || "show";
+  if (action === "show") {
+    const url = process.env.BROKER_URL || readEndpointFile();
+    console.log(`endpoint : ${url || "(未設定)"}`);
+    console.log(`來源     : ${process.env.BROKER_URL ? "環境變數 BROKER_URL" : readEndpointFile() ? ENDPOINT_FILE : "無"}`);
+    return;
+  }
+  if (action === "set") {
+    const url = args[1] || flagString(flags, "url");
+    if (!url) usageDie("用法：broker endpoint set <https://...>");
+    writeEndpointFile(url);
+    console.log(`✔ endpoint 已設定（部機層級，任何 folder 通用）：${normalizeEndpoint(url)}`);
+    console.log(`  檔案：${ENDPOINT_FILE}（600）`);
+    return;
+  }
+  if (action === "clear") {
+    try {
+      fs.unlinkSync(ENDPOINT_FILE);
+      console.log("✔ endpoint 已清除（之後所有 command 會要求重新設定）");
+    } catch {
+      console.log("（本來就冇設定）");
+    }
+    return;
+  }
+  usageDie("用法：broker endpoint show | set <url> | clear");
+}
+
+function cmdEncPubkey(config: Config, flags: Record<string, string | true>) {
+  const agent = resolveAgent(config, flags);
+  console.log(encPubkeyFor(agent));
+}
+
 function cmdPubkey(config: Config, flags: Record<string, string | true>) {
   const agent = resolveAgent(config, flags);
   console.log(derivePublicKey(agent));
@@ -316,7 +471,7 @@ function cmdPubkey(config: Config, flags: Record<string, string | true>) {
 
 interface ClaimResponse {
   agent_id: string;
-  secrets: Record<string, Record<string, unknown> & { value?: string }>;
+  secrets: Record<string, Record<string, unknown> & { value?: string; sealed?: string }>;
   errors?: Array<{ key: string; error: string }>;
   expires_at?: string | null;
 }
@@ -338,6 +493,7 @@ async function cmdClaim(config: Config, flags: Record<string, string | true>, ke
   const agent = resolveAgent(config, flags);
   const wants = keys.length > 0 ? keys : ["github"];
   const result = await doClaim(config, agent, wants);
+  hydrateSealedSecrets(agent, result);
 
   if (flags.env) {
     for (const [key, value] of Object.entries(result.secrets)) {
@@ -369,6 +525,7 @@ async function cmdExec(config: Config, flags: Record<string, string | true>, com
   const agent = resolveAgent(config, flags);
   const keys = (flagString(flags, "keys") || "github").split(",").map((s) => s.trim()).filter(Boolean);
   const result = await doClaim(config, agent, keys);
+  hydrateSealedSecrets(agent, result);
 
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
   for (const [key, value] of Object.entries(result.secrets)) {
@@ -402,6 +559,7 @@ function cmdAskRegister(config: Config, flags: Record<string, string | true>) {
   const record: Record<string, unknown> = {
     id: agent,
     pubkey,
+    enc_pubkey: encPubkeyFor(agent),
     status: "active",
     entitlements,
     created_at: new Date().toISOString(),
@@ -427,10 +585,12 @@ function usage() {
   console.log(`broker — per-agent Secret Broker CLI (v${readCliVersion()})
 
 用法:
+  broker endpoint show|set <url>|clear                         設定部機層級 endpoint（默認冇）
   broker init --agent <id> [--broker-url <url>] [--force]      建立 agent 身份（Ed25519；macOS→Keychain，Linux→600 檔）
   broker ask-register [--agent <id>]                          印出「要喺 Cloudflare 寫入嘅 agent JSON」
   broker whoami [--agent <id>]                                 顯示本機身份
-  broker pubkey [--agent <id>]                                 由私鑰推導公鑰（貼上 Cloudflare 用）
+  broker pubkey [--agent <id>]                                 由私鑰推導簽名公鑰
+  broker enc-pubkey [--agent <id>]                             由私鑰推導密封公鑰（畀人 seal secret）
   broker health                                                檢查 broker
 
   broker claim [key...] [--print|--env|--json] [--agent <id>]   取 secret（預設遮罩摘要）
@@ -477,6 +637,12 @@ async function main() {
   switch (cmd) {
     case "init":
       cmdInit(flags);
+      return;
+    case "endpoint":
+      cmdEndpoint(config, flags, positional);
+      return;
+    case "enc-pubkey":
+      cmdEncPubkey(config, flags);
       return;
     case "whoami":
       cmdWhoami(config, flags);

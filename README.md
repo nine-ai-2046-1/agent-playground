@@ -84,9 +84,10 @@ sequenceDiagram
 | 你想做嘅事 | 你要做（人） | 用邊條指令／邊度 |
 | :-- | :-- | :-- |
 | **第一次裝** | 裝 CLI（release tarball + sha256 驗證） | `bash scripts-bootstrap-install.sh` |
+| **換新電腦** | ① `endpoint set` 一次 ② `init`／搬私鑰 ③ 其餘照舊 | `broker endpoint set <url>` → `broker init` |
 | **新機／新 agent 加入** | ① 部機 `init` ② 印 JSON ③ 你去 Cloudflare 貼 | `broker init` → `broker ask-register` → KV put |
 | **日常拿 GitHub token** | 乜都唔使做，直接跑 | `broker exec -- gh pr list`（或 `broker claim github`） |
-| **加一個新 key（OPENAI／Azure…）** | ① 本機加密 ② Cloudflare 寫 `sec:` ③ 改 `entitlements` | `secret-envelope.mjs` → `wrangler kv key put` |
+| **加一個新 key（OPENAI／Azure…）** | ① 攞 agent 密封公鑰 ② 本機 seal ③ Cloudflare 寫 `sec:` ④ 改 `entitlements` | `broker enc-pubkey` → `secret-seal.mjs` → `wrangler kv key put` |
 | **換 value（輪替同一條 key）** | 重新加密覆寫同一個 `sec:` key | agent 唔需要改任何嘢，下次 claim 就係新值 |
 | **懷疑私鑰洩漏** | `rotate` 生成新 key → 去 Cloudflare 換公鑰 | `broker rotate` → `ask-register` |
 | **某部機／某 agent 唔再用** | 去 Cloudflare 刪 `agent:<id>` | KV delete（CLI 冇呢個功能） |
@@ -122,8 +123,10 @@ sequenceDiagram
 
 ```bash
 # ── 你（管理員）一次性 ────────────────────────────────
-# 1) 本機加密（明文只喺你部機出現過，輸出係密文信封）
-printf '%s' 'sk-proj-xxxx' | node scripts/secret-envelope.mjs --agent my-agent --name openai.api_key
+# 1) 攞 agent 嘅「密封公鑰」（公開資料，喺 agent 部機印）
+broker enc-pubkey --agent my-agent
+# 2) 用該公鑰密封（明文只喺你部機出現，輸出係密文；Worker 冇能力解）
+printf '%s' 'sk-proj-xxxx' | node scripts/secret-seal.mjs --agent my-agent --name openai.api_key --enc-pubkey <上面嗰條公鑰>
 # 2) 跟住照佢印出嘅指令寫入 Cloudflare KV：sec:my-agent:openai.api_key
 # 3) 喺 agent:my-agent 嘅 JSON entitlements 加 "openai.api_key"
 #    （同一個 JSON 可加 azure.openai.endpoint 等）
@@ -191,9 +194,14 @@ broker whoami
 > 唔建議 `npm i -g github:nine-ai-2046-1/agent-playground`：會跟隨 `main` HEAD（供應鏈風險），
 > 而且喺已有安裝上重裝會撞 npm `ENOTEMPTY`。要用就用 `--from-git` 加 `REF=<tag 或 commit sha>`。
 
-## 快速開始（3 步）
+## 快速開始（4 步）
+
+> **默認冇 endpoint**（唔會偷偷連任何網址）。每部機只需設定一次，之後任何 folder 都用同一個。
 
 ```bash
+# 0. 部機設定 broker endpoint（部機層級，存 ~/.config/secret-broker/endpoint，600）
+broker endpoint set https://<你嘅-worker>.workers.dev
+
 # 1. 部機生成身份（私鑰留本機：macOS Keychain／Linux 600 檔）
 broker init --agent my-agent
 
@@ -210,7 +218,9 @@ broker exec -- gh pr list
 
 | 指令 | 作用 |
 | :-- | :-- |
-| `broker init --agent <id>` | 生成 keypair、寫 config、印公鑰 |
+| `broker endpoint show \| set <url> \| clear` | 設定／查看／清除**部機層級** endpoint（默認冇） |
+| `broker init --agent <id> [--broker-url <url>]` | 生成 keypair、寫 config、印簽名公鑰＋密封公鑰 |
+| `broker enc-pubkey` | 由私鑰推導 X25519 密封公鑰（貼上 registry／畀人 seal secret） |
 | `broker whoami` | 顯示本機 agent / broker / 有冇私鑰 |
 | `broker health` | 檢查 broker 可達性（`/health`） |
 | `broker pubkey` | 由私鑰推導公鑰（貼上 Cloudflare 用，唔需要抄） |
@@ -221,8 +231,9 @@ broker exec -- gh pr list
 | `broker version \| --version \| -v` | 印版本 |
 | `broker help \| --help \| -h` | 印說明（含文件索引、退出碼） |
 
-環境變數：`BROKER_URL`（覆蓋 broker 網址）、`BROKER_AGENT_ID`（預設 agent）、`BROKER_PRIVATE_KEY`（CI／容器用私鑰）。
-環境變數優先於 `~/.config/secret-broker/config.json`。
+設定層級（由高至低）：`BROKER_URL` 環境變數 → 部機 endpoint 檔 `~/.config/secret-broker/endpoint` → 舊 `config.json` 內 `brokerUrl`（一次性自動遷移去 endpoint 檔）。
+`~/.config/secret-broker/config.json` 而家只存 `agentId`（600）。
+其他環境變數：`BROKER_AGENT_ID`（預設 agent）、`BROKER_PRIVATE_KEY`（CI／容器用私鑰）。
 
 CLI 退出碼：`0` 成功、`1` 執行錯誤、`2` 用法錯誤（包括冇打指令、缺參數、agent id 格式錯）；claim 專用 `3` 401、`4` 403、`5` 404、`6` 409。
 
@@ -310,7 +321,7 @@ printf 'my-smtp-password' | node scripts/secret-envelope.mjs --agent opencode-01
 | Key | 內容 |
 | :-- | :-- |
 | `agent:<id>` | `{id, pubkey, status, entitlements, github{…}, created_at, updated_at}` |
-| `sec:<agent>:<name>` | 信封加密後嘅 JSON：`{v:1, alg:"A256GCM", iv, ct}`（AAD 綁 `<agent>:<name>`；KV 內**無明文**）|
+| `sec:<agent>:<name>` | **v2 密封信封**：`{v:2, alg:"X25519-A256GCM", epk, iv, ct}`（AAD 綁 `sec\|<agent>\|<name>`；KV 內**無明文**，Worker **冇私鑰所以解唔到**）|
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s（重放保護）|
 
 ## 限流（N2）
@@ -377,27 +388,35 @@ Cloudflare KV 對同一個 key 有「每秒 1 次寫入」上限，密集 claim 
 - 查（Cloudflare 帳號層，冇 HTTP 讀取端點）：
   `wrangler d1 execute broker-audit --remote --command "SELECT ts,agent_id,result,status,ip_hash,machine_id FROM audit ORDER BY id DESC LIMIT 20"`
 
-## 靜態 secret 加密（N3）
+## 靜態 secret：端到端密封（v2，Worker 盲）
 
-Worker 收到 `PUT /v1/secrets/:agent/:name` 後**即刻用 AES-256-GCM 加密**才寫入 KV：
+> 舊版（N3）用 Worker 內 `BROKER_MASTER_KEY` 做信封加密：安全前提係「信任 Cloudflare 同 Worker 代碼」。
+> 新版改成 **只有 agent 本機解得**：密封只用公開嘅 X25519 公鑰，私鑰永遠唔離開 agent 部機 → Worker 即使被完全接管、KV 被 dump，都只得密文。
 
-| 項 | 設計 |
+| 項 | v2 設計 |
 | :-- | :-- |
-| 演算法 | AES-256-GCM，12-byte 隨機 IV |
-| 金鑰 | `BROKER_MASTER_KEY`（Worker secret，base64url 32 bytes） |
-| AAD | `sec|<agent>|<name>` — 搬 key／改 agent 名會解密失敗（防調包） |
-| KV 內 | `{"v":1,"alg":"A256GCM","iv":"…","ct":"…"}` — 無明文、無 metadata |
-| 舊資料 | 讀到非信封格式即當 legacy 明文（向後兼容）；要遷移就用 `scripts/secret-envelope.mjs` 重新加密再覆寫該 KV key |
-| 未設 key | 寫入回 **503 `encryption_not_configured`**（fail closed，唔會偷偷存明文） |
+| 金鑰交換 | X25519（一次性臨時 keypair `epk` + agent 長期密封公鑰） |
+| 對稱加密 | HKDF-SHA256（salt=`broker\|<agent>\|<name>`，info=`secret-broker-v2`）→ AES-256-GCM，12-byte IV |
+| AAD | `sec\|<agent>\|<name>` — key 搬去第二個 agent／改 secret 名即解唔到（防調包） |
+| KV 內 | `{"v":2,"alg":"X25519-A256GCM","epk":"…","iv":"…","ct":"…"}`（`ct` 已含 16-byte GCM tag） |
+| Worker 角色 | 只做「原封不動轉發」：認到 `v:2` 就回 `{sealed: <原字串>}`，**零解密能力** |
+| agent 側 | `broker claim`／`exec` 收到 `sealed` 後用本機私鑰（同一條 Ed25519 種子確定性衍生 X25519）解封 |
+| 舊格式 | `v:1` master-key 信封／明文仍然讀得到（Worker 解得返），方便遷移；但新寫入一律 v2 |
 
 ```bash
-# 一次性：產生 master key 並上載
-node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))' > ~/Doubao/secrets/broker-master-key.b64
-wrangler secret put BROKER_MASTER_KEY < ~/Doubao/secrets/broker-master-key.b64
+# 寫入方（只需要公鑰；明文唔會離開呢部機）
+broker enc-pubkey --agent <id>                      # 喺 agent 部機印（公開資料）
+printf '%s' "$OPENAI_API_KEY" | node scripts/secret-seal.mjs \
+  --agent <id> --name openai.api_key --enc-pubkey <b64url>
+# 跟住照印出嘅 wrangler kv key put 指令寫入 Cloudflare KV
 
-# 舊明文遷移：本機重新加密後覆寫
-printf '%s' "$OLD_VALUE" | node scripts/secret-envelope.mjs --agent <id> --name <key>
+# agent 部機（本機解密，Worker 全程見唔到明文）
+broker claim openai.api_key --print
 ```
+
+**X25519 公鑰點嚟？** 由同一條 Ed25519 私鑰確定性衍生（`SHA-512(seed)` 前半 + clamp），所以舊 agent **唔需要重新 init**、唔需要新 storage；`broker init`／`ask-register` 會自動印／寫入 `enc_pubkey` 欄位。
+
+`BROKER_MASTER_KEY` 由 N3 遺留落嚟，只用嚟讀舊 `v:1` secret；如果 KV 內全部轉晒 v2，呢個 secret 可以刪。
 
 ## CI 驗證（生產 E2E）
 
@@ -417,7 +436,7 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 
 1. **Cloudflare Access 未開**：Zero Trust Free 要綁信用卡（$0 但要授權超額收費），所以邊緣層未有 Access Service Token；現時保護全靠 Worker 內簽名驗證。
 2. registry 只可以由 Cloudflare 帳號寫入（已冇 admin API）。**Cloudflare 帳號 = 唯一 root of trust**：請務必開 2FA、用最小權限 API token。
-3. **Master key 單點**：`BROKER_MASTER_KEY` 只存喺 Worker secret 同本機 `~/Doubao/secrets/broker-master-key.b64`（600）。遺失即解唔到舊 secret（要重新 `secret-put`）；輪替要保留舊 key 做解密（kid 欄位已預留但未多 key）。
+3. **私鑰單點（v2）**：agent 私鑰遺失＝永久解唔到已密封嘅 secret（依定案「失鑰不救」，要用 `broker rotate` 換 keypair 再重新 seal 全部 secret）。舊 `v:1` 信封另需 `BROKER_MASTER_KEY`（只為向後兼容而保留）。
 4. `wants` 最多 12 項，`repositories` 最多 20 個。
 5. 舊 bearer endpoint 仍然存在，文件齊備後應下架。
 

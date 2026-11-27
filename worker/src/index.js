@@ -261,8 +261,21 @@ async function resolveSecret(env, agentId, name, agent) {
   // 其他一律當「靜態 secret」：KV key sec:<agent>:<name>（信封加密，AAD 綁 agent+name）
   const raw = await env.BROKER_KV.get(`sec:${agentId}:${name}`, "text");
   if (raw === null) throw Object.assign(new Error("secret_not_found"), { status: 404 });
+
+  // v2 密封信封（X25519）：Worker 冇私鑰，所以唔可以亦唔會解 —— 原封不動交畀 agent 本機解。
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    parsed = null;
+  }
+  if (parsed && parsed.v === 2 && parsed.alg === "X25519-A256GCM" && typeof parsed.ct === "string") {
+    return { sealed: raw, encrypted: true, e2e: true };
+  }
+
+  // 舊格式（v1 master-key 信封 或 明文）：仍然由 Worker 解／原樣回，方便遷移
   const decrypted = await decryptSecret(env, agentId, name, raw);
-  return { value: decrypted.value, encrypted: !decrypted.legacy };
+  return { value: decrypted.value, encrypted: !decrypted.legacy, legacy_format: true };
 }
 
 /** ====== audit log（console + D1）====== */

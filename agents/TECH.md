@@ -23,7 +23,7 @@
 ┌─────────── agent 機器 ───────────┐        ┌──── Cloudflare ─────┐
 │ broker CLI                       │        │ Worker (v2)         │
 │  ├ Keychain: 私鑰 (Ed25519)      │  簽名  │  ├ /v1/claim 驗簽   │
-│  ├ config.json: brokerUrl, id    │ ─────> │  ├ (冇 admin API)   │
+│  ├ endpoint: broker URL（機器級）│ ─────> │  ├ (冇 admin API)   │
 │  └ 子進程 env: GH_TOKEN …         │ <───── │  └ /health          │
 └──────────────────────────────────┘ secret │        │            │
                                              │        ├ KV BROKER_KV│
@@ -62,7 +62,7 @@
 | Key | Value | 說明 |
 | :-- | :-- | :-- |
 | `agent:<id>` | JSON `{id, pubkey, status, entitlements[], github{installation_id,repositories[],permissions}, created_at, updated_at, last_used_at, last_used_machine, last_used_ip}` | `pubkey` = base64url(raw 32 bytes) |
-| `sec:<agent>:<name>` | JSON `{v:1, alg:"A256GCM", iv, ct}` | 靜態 secret 信封加密（AES-256-GCM，AAD=`sec\|<agent>\|<name>`）；`github` 唔用呢個 key；讀到非信封格式當 legacy 明文 |
+| `sec:<agent>:<name>` | JSON `{v:2, alg:"X25519-A256GCM", epk, iv, ct}` | **端到端密封**：X25519 ECDH + HKDF-SHA256 + AES-256-GCM，AAD=`sec\|<agent>\|<name>`；Worker 認到 v2 只原封轉發（`{sealed}`），**零解密能力**；v1 master-key 信封／明文仍可讀（兼容） |
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s | 重放保護；**先寫後派**，寫失敗即拒絕 |
 | `rl:claim:<hash>` | 數字字串，TTL 90s | 固定窗限流計數器；`<hash>` = `SHA-256(agent|ip)` 前 16 hex |
 
@@ -134,7 +134,7 @@ v1|<agent_id>|<wants.join(",")>|<ts>|<nonce>
 | 動作 | 做法 |
 | :-- | :-- |
 | 登記／換公鑰／改 entitlement／停用 | 改 KV `agent:<id>` JSON（Dashboard 或 `wrangler kv key put`）；CLI 用 `broker ask-register` 印 JSON |
-| 加／換靜態 secret | 本機 `scripts/secret-envelope.mjs` 加密 → `wrangler kv key put "sec:<agent>:<name>"` |
+| 加／換靜態 secret | 本機 `scripts/secret-seal.mjs --agent <id> --name <n> --enc-pubkey <b64url>` 密封 → `wrangler kv key put "sec:<agent>:<name>" --path <信封檔>` |
 | 撤銷 | 刪 KV `agent:<id>`（Dashboard／wrangler）—— CLI 同 Worker 都冇 delete |
 | 舊明文遷移 | `decrypt` 仍接受 legacy 明文；用 envelope script 重新加密覆寫該 key |
 
@@ -196,7 +196,8 @@ D1（`AUDIT_DB` / database `broker-audit`）schema：
 | 區塊 | 內容 |
 | :-- | :-- |
 | utilities | `die(message, code)`、`parseFlags`、`flagString`、`readCliVersion` |
-| config | `~/.config/secret-broker/config.json`（600）；`BROKER_URL` / `BROKER_AGENT_ID` 環境變數優先於 config |
+| endpoint（部機層級） | `~/.config/secret-broker/endpoint`（600）；**默認冇**，未設即擋並提示 `broker endpoint set <url>`；`BROKER_URL` 環境變數最優先 |
+| config | `~/.config/secret-broker/config.json`（600，只存 `agentId`）；舊檔內 `brokerUrl` 首次讀取時自動遷移去 endpoint 檔 |
 | key material | macOS Keychain service `secret-broker-key:<agent>`；非 macOS 用 `KEYS_DIR` 600 檔；私鑰以 PKCS#8 DER 存放 |
 | 身份 | `cmdInit`、`cmdWhoami`、`cmdPubkey`、`cmdRotate` |
 | claim | `signPayload` → `doClaim`（含退出碼映射）→ `cmdClaim`（遮罩／`--print`／`--env`）|
@@ -242,7 +243,8 @@ npx wrangler secret put GITHUB_APP_PEM_BASE64 < pem.base64.txt
 npx wrangler deploy
 ```
 
-必要 secrets：`GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`、`BROKER_MASTER_KEY`（base64url 32 bytes；本機備份 `~/Doubao/secrets/broker-master-key.b64`，600）。
+必要 secrets：`GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`。
+`BROKER_MASTER_KEY`（base64url 32 bytes；本機備份 `~/Doubao/secrets/broker-master-key.b64`，600）**只為讀舊 v1 信封而保留**；KV 全部轉 v2 後可以刪。
 
 `AGENT_TOKEN`／`AGENT_TOKEN_PREV` 已無程式引用，部署後應 `wrangler secret delete` 清走。
 
