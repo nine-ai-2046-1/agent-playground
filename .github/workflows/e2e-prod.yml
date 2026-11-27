@@ -64,7 +64,6 @@ jobs:
           test "$c0" = 2 && test "$c1" = 2 && test "$c2" = 2
 
       - name: 生產 health
-        id: health
         run: |
           set -euo pipefail
           code=$(curl -sS -m 15 -o /tmp/health.json -w "%{http_code}" "$BROKER_URL/health")
@@ -97,59 +96,43 @@ jobs:
           echo "rc=$rc" >> /tmp/claim.diag
           echo "--- claim json 頭 600 字 ---" >> /tmp/claim.diag
           head -c 600 /tmp/claim.json >> /tmp/claim.diag 2>/dev/null
-          sed -E 's/(ghs_[A-Za-z0-9]{6})[A-Za-z0-9]+/\1…/g' /tmp/claim.diag
+          sed -E 's/(ghs_[A-Za-z0-9]{6})[A-Za-z0-9]+/\1.../g' /tmp/claim.diag
           set -e
           test "$rc" = 0
-          python3 - <<'PY'
-          import json
-          d = json.load(open('/tmp/claim.json'))
-          tok = (d.get('secrets', {}).get('github') or {}).get('value') or ''
-          assert tok, d
-          assert len(tok) >= 80, f"token 太短: {len(tok)}"
-          print(f"claim OK: prefix={tok[:4]} len={len(tok)} expires_at={(d['secrets']['github'].get('expires_at') or '')}")
-          PY
+          python3 -c "
+import json
+d = json.load(open('/tmp/claim.json'))
+tok = (d.get('secrets', {}).get('github') or {}).get('value') or ''
+assert tok, d
+assert len(tok) >= 80, f'token 太短: {len(tok)}'
+print(f'claim OK: prefix={tok[:4]} len={len(tok)}')
+"
 
       - name: 寫報告
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
-          python3 - <<'PY'
-          import json, os, pathlib, datetime
-          diag = None
-          f = pathlib.Path("/tmp/claim.diag")
-          if f.exists():
-              diag = f.read_text(errors="replace")[-1200:]
-          rep = {
-              "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-              "commit": os.environ.get("GITHUB_SHA"),
-              "runner": os.environ.get("RUNNER_NAME"),
-              "broker": os.environ.get("BROKER_URL"),
-              "agent": os.environ.get("BROKER_AGENT_ID"),
-              "hasKey": os.environ.get("HAS_KEY") == "true",
-              "result": "success" if os.environ.get("JOB_STATUS") == "success" else "failed",
-              "runUrl": f"{os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
-              "diag": diag,
-          }
-          pathlib.Path("e2e-report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=2) + "\n")
-          print(json.dumps(rep, ensure_ascii=False))
-          PY
-          const rep = {
-            at: new Date().toISOString(),
-            commit: process.env.GITHUB_SHA,
-            runner: process.env.RUNNER_NAME,
-            broker: process.env.BROKER_URL,
-            agent: process.env.BROKER_AGENT_ID,
-            hasKey: process.env.HAS_KEY === "true",
-            result: ok ? "success" : "failed",
-            runUrl: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-            diag: (() => { try { return fs.readFileSync('/tmp/claim.diag','utf8').slice(-1200); } catch { return null; } })(),
-          };
-          fs.writeFileSync("e2e-report.json", JSON.stringify(rep, null, 2) + "\n");
-          console.log(JSON.stringify(rep));
-          '
-        env:
-          JOB_STATUS: ${{ job.status }}
+          python3 -c "
+import json, os, pathlib, datetime
+diag = None
+f = pathlib.Path('/tmp/claim.diag')
+if f.exists():
+    diag = f.read_text(errors='replace')[-1200:]
+rep = {
+  'at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+  'commit': os.environ.get('GITHUB_SHA'),
+  'runner': os.environ.get('RUNNER_NAME'),
+  'broker': os.environ.get('BROKER_URL'),
+  'agent': os.environ.get('BROKER_AGENT_ID'),
+  'hasKey': os.environ.get('HAS_KEY') == 'true',
+  'result': 'success' if os.environ.get('JOB_STATUS') == 'success' else 'failed',
+  'runUrl': os.environ.get('GITHUB_SERVER_URL') + '/' + os.environ.get('GITHUB_REPOSITORY') + '/actions/runs/' + os.environ.get('GITHUB_RUN_ID'),
+  'diag': diag,
+}
+pathlib.Path('e2e-report.json').write_text(json.dumps(rep, ensure_ascii=False, indent=2) + chr(10))
+print(json.dumps(rep, ensure_ascii=False, indent=2))
+"
 
       - name: 提交報告（只 main，唔觸發下一輪）
         if: always() && github.ref == 'refs/heads/main'
