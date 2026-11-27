@@ -131,6 +131,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | :-- | :-- | :-- | :-- |
 | R10 | Workers.dev 端點完全公開 | 冇 Access（要信用卡，已暫緩）；任何人可探測／DoS | 免費 WAF rate-limit rule；或自訂域名 + Access |
 | R11 | 假 broker／MITM | 回應冇簽名；config `brokerUrl` 明文可改 | broker 回應簽名 + CLI 公鑰 pin；config 加 pin |
+| R13 | 源碼公開（2026-11-27 已轉 public） | **已核（掃描通過）**：全歷史 52 commit／3 ref（main＋v0.4.0＋v0.5.0）／25 個 Actions run log 全部零真 secret（regex：`gh[shup]_[A-Za-z0-9]{30,}`、PEM 私鑰本體、`github_pat_`、`AKIA`）；工作樹無 `.dev.vars`／`.pem`／`*.base64.txt`；KV `sec:*` 0 個、無明文；Worker 無 admin API；CLI 無 delete | 公開後仍要守住：Cloudflare 帳號 2FA、App 只用最小權限、任何新 secret 一律唔入 repo／log；`wrangler.toml` 內 KV／D1 id 與 worker 名屬識別碼（非憑證），如要連識別碼都藏，改用私有 fork 部署 |
 | R12 | 本機殘留 | **已修（N6）**：PEM 已搬 `~/Doubao/secrets/cloudflare-app.private-key.pem`（600，目錄 700），sha256 核對後刪原檔；master key 600。`.dev.vars` 仍留（600，本機開發用） | `.dev.vars` 可改由 Keychain／1Password CLI 注入 |
 | R13 | 撤銷後仍可能短暫可用 | KV 一致性 + token 已 mint（最長 1 小時）| 文件講清楚：撤銷 = 停止**新** token，已發 token 自然到期 |
 | R14 | 舊 `/github-token` endpoint | **已默認下架**：無 `LEGACY_BEARER_ENABLED=true` 一律 404；啟用時必須有 `LEGACY_REPOSITORIES` allowlist，否則 403 | 保留 opt-in 供 V1/V2 回歸；長期可完全刪碼 |
