@@ -1,12 +1,12 @@
 {
-  "at": "2026-11-27T10:45:11Z",
-  "commit": "ae75df571f90dab02434f31a3da983b975a02efe",
-  "runner": "GitHub Actions 1000000162",
+  "at": "2026-11-27T10:45:33Z",
+  "commit": "7c28a00f4600f168bfdf4ba7e7d492e14bd02bf0",
+  "runner": "GitHub Actions 1000000163",
   "broker": "https://github-token-broker.baobao2046.workers.dev",
   "agent": "ci-e2e-01",
   "hasKey": true,
   "result": "failed",
-  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/45984712835",
+  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/45984762620",
   "claim": null,
   "diag": null
 }
