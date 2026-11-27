@@ -578,25 +578,56 @@ export default {
       }
 
       // 重放保護：nonce 用過即拒（先寫再派 secret，任何失敗都唔會放行兩次）
+      // 主路徑用 D1 唯一鍵（跨 isolate 一致，唔會撞 KV 每秒一寫）；D1 唔可用時退 KV。
       const nonceKey = `nonce:${agentId}:${nonce}`;
-      if (await env.BROKER_KV.get(nonceKey)) {
+      let replay = false;
+      let nonceStored = false;
+      if (env.AUDIT_DB) {
+        try {
+          const inserted = await env.AUDIT_DB.prepare(
+            "INSERT OR IGNORE INTO nonce (agent, nonce, ts) VALUES (?1, ?2, ?3) RETURNING agent",
+          )
+            .bind(agentId, nonce, Math.floor(Date.now() / 1000))
+            .first();
+          nonceStored = true;
+          replay = !inserted;
+          if (!replay) {
+            // 順手清理過期 nonce（防止表無限長大）
+            ctx.waitUntil(
+              env.AUDIT_DB.prepare("DELETE FROM nonce WHERE ts < ?1")
+                .bind(Math.floor(Date.now() / 1000) - NONCE_TTL_SECONDS)
+                .run()
+                .catch(() => {}),
+            );
+          }
+        } catch (_) {
+          nonceStored = false; // 落返 KV
+        }
+      }
+      if (!nonceStored) {
+        try {
+          if (await env.BROKER_KV.get(nonceKey)) {
+            replay = true;
+          } else {
+            await env.BROKER_KV.put(nonceKey, "1", { expirationTtl: NONCE_TTL_SECONDS });
+          }
+        } catch (error) {
+          // 重放保護寫唔到 = 唔可以派（fail closed），但要係乾淨 503 而唔係 500
+          audit(request, env, ctx, {
+            agent_id: agentId,
+            wants,
+            result: "kv_error",
+            status: 503,
+            details: { stage: "nonce", reason: sanitizeDetail((error && error.message) || "kv_write_failed") },
+          });
+          const res = json({ error: "kv_unavailable", retry_after: 5 }, 503);
+          res.headers.set("Retry-After", "5");
+          return finish(res);
+        }
+      }
+      if (replay) {
         audit(request, env, ctx, { agent_id: agentId, wants, result: "replay", status: 409 });
         return finish(json({ error: "replay_detected" }, 409));
-      }
-      try {
-        await env.BROKER_KV.put(nonceKey, "1", { expirationTtl: NONCE_TTL_SECONDS });
-      } catch (error) {
-        // 重放保護寫唔到 = 唔可以派（fail closed），但要係乾淨 503 而唔係 500
-        audit(request, env, ctx, {
-          agent_id: agentId,
-          wants,
-          result: "kv_error",
-          status: 503,
-          details: { stage: "nonce", reason: sanitizeDetail((error && error.message) || "kv_write_failed") },
-        });
-        const res = json({ error: "kv_unavailable", retry_after: 5 }, 503);
-        res.headers.set("Retry-After", "5");
-        return finish(res);
       }
 
       // entitlement 檢查：agent 只可以拿 registry 內列明嘅 secret

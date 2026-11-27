@@ -58,9 +58,11 @@ function makeKV() {
 function makeD1() {
   const rows = [];
   const rate = new Map(); // 模擬 D1 rate_limit 表（跨 isolate 共享）
+  const nonces = new Set(); // 模擬 D1 nonce 唯一鍵
   return {
     _rows: rows,
     _rate: rate,
+    _nonces: nonces,
     prepare(sql) {
       const stmt = {
         params: [],
@@ -69,6 +71,7 @@ function makeD1() {
           return this;
         },
         async run() {
+          if (sql.includes("DELETE FROM nonce")) return { success: true };
           if (sql.includes("INSERT INTO audit")) {
             const [
               ts, kind, agent_id, actor, action, wants, result, status,
@@ -82,6 +85,12 @@ function makeD1() {
           return { results: [] };
         },
         async first() {
+          if (sql.includes("INSERT OR IGNORE INTO nonce")) {
+            const key = `${this.params[0]}|${this.params[1]}`;
+            if (nonces.has(key)) return null;
+            nonces.add(key);
+            return { agent: this.params[0] };
+          }
           if (sql.includes("INSERT INTO rate_limit")) {
             const key = `${this.params[0]}|${this.params[1]}|${this.params[2]}`;
             const used = Number(rate.get(key) || 0) + 1;
@@ -262,8 +271,12 @@ async function main() {
   const replay = await claim(claimBody("agent-a", ["smtp.password"], A, "nonce00000005"));
   check("nonce 重用 → 409 replay_detected", replay.status === 409, `status=${replay.status}`);
 
-  /* 9. nonce 有寫入 KV */
-  check("KV 內 nonce 有寫入", Boolean(await kv.get("nonce:agent-a:nonce00000005")), "nonce key 存在");
+  /* 9. nonce 有寫入（D1 唯一鍵；KV 只係後備） */
+  check(
+    "nonce 有寫入（D1 唯一鍵）",
+    d1._nonces.has("agent-a|nonce00000005"),
+    `d1 nonce 存在；KV 後備 key=${Boolean(await kv.get("nonce:agent-a:nonce00000005"))}`,
+  );
 
   /* 10. 已停用 agent → 401 */
   const gone = await claim(claimBody("agent-gone", ["github"], A, "nonce00000006"));
@@ -385,7 +398,7 @@ async function main() {
 
   /* KV 寫入失敗（N7.1）：限流降級唔可以 500；nonce 寫唔到要 fail-closed 503 */
   {
-    const mkEnvWithFailingPut = async (failPrefix, id) => {
+    const mkEnvWithFailingPut = async (failPrefix, id, dropD1 = false) => {
       const kvX = makeKV();
       const kp = keypair();
       await kvX.put(
@@ -398,14 +411,20 @@ async function main() {
         if (String(key).startsWith(failPrefix)) throw new Error("KV PUT failed: 429 write rate limited");
         return origPut(key, value, opts);
       };
-      return { env: { ...env, BROKER_KV: kvX }, kp };
+      const envX = { ...env, BROKER_KV: kvX };
+      if (dropD1) delete envX.AUDIT_DB; // 模擬「D1 唔可用」→ 走 KV nonce 後備
+      return { env: envX, kp };
     };
 
     for (const [label, prefix, expectStatus] of [
       ["限流計數寫唔到 → 降級放行（唔可以 500）", "rl:", 200],
       ["nonce 寫唔到 → 503 fail-closed", "nonce:", 503],
     ]) {
-      const { env: envX, kp } = await mkEnvWithFailingPut(prefix, `kvfail-${prefix.replace(":", "")}`);
+      const { env: envX, kp } = await mkEnvWithFailingPut(
+        prefix,
+        `kvfail-${prefix.replace(":", "")}`,
+        prefix === "nonce:", // nonce 測試要冇 D1，才練到 KV 後備 fail-closed
+      );
       const agent = `kvfail-${prefix.replace(":", "")}`;
       const ts = Math.floor(Date.now() / 1000);
       const nonce = crypto.randomBytes(16).toString("base64url");
