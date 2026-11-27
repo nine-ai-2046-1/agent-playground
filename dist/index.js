@@ -317,6 +317,9 @@ function machineFingerprint() {
     return cachedMachine;
 }
 async function callBroker(config, method, pathname, body) {
+    if (!config.brokerUrl) {
+        die("未設定 broker endpoint（默認冇 endpoint，唔會偷偷連任何網址）。\n  先設定一次（部機層級，任何 folder 通用）：\n    broker endpoint set https://<worker>.workers.dev\n  或臨時：export BROKER_URL=https://<worker>.workers.dev", 2);
+    }
     const headers = {
         "Content-Type": "application/json",
         "X-Broker-Machine": machineFingerprint(),
