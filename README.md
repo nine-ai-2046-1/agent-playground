@@ -225,7 +225,7 @@ wrangler secret delete AGENT_TOKEN_PREV
 | 去邊 | 內容 |
 | :-- | :-- |
 | Cloudflare log（console JSON） | 全量，供 `wrangler tail` / Logpush |
-| D1 `broker-audit.audit` | `ts, kind, actor, action, agent_id, outcome, ip_hash, detail` |
+| D1 `broker-audit.audit` | `id, ts(ISO8601), kind, agent_id, actor, action, wants, result, status, ip_hash, ua, latency_ms, details` |
 
 設計約束：
 
@@ -233,7 +233,7 @@ wrangler secret delete AGENT_TOKEN_PREV
 - IP 只存 `SHA-256(CF-Connecting-IP)` 前 16 hex，唔存原文
 - 寫入用 `ctx.waitUntil`，D1 掛咗都唔會拖死 claim（只記 `audit:write_failed` 落 console）
 - 查：`GET /v1/admin/audit?limit=50` 或
-  `wrangler d1 execute broker-audit --remote --command "SELECT ts,kind,action,outcome FROM audit ORDER BY ts DESC LIMIT 20"`
+  `wrangler d1 execute broker-audit --remote --command "SELECT ts,kind,action,agent_id,result,status FROM audit ORDER BY id DESC LIMIT 20"`
 
 ## 靜態 secret 加密（N3）
 

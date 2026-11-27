@@ -148,21 +148,25 @@ Admin 限流：`rl:admin:<hash(ip)>`，默認 60/min（`ADMIN_RATE_LIMIT`）。
 `GET /v1/admin/audit?limit=&kind=`（admin auth；限流 30/min，`AUDIT_RATE_LIMIT`）
 
 ```json
-{"rows":[{"ts":1793000000,"kind":"claim","actor":null,"action":"claim","agent_id":"…","outcome":"ok","ip_hash":"…","detail":{…}}],"limit":50}
+{"rows":[{"id":42,"ts":"2026-11-27T11:25:04.251Z","kind":"claim","agent_id":"ci-e2e-01","actor":null,"action":null,"wants":"[\"github\"]","result":"ok","status":200,"ip_hash":"45398917097cb852","ua":"…","latency_ms":null,"details":"{\"delivered\":[\"github\"],\"errors\":[]}"}],"limit":50}
 ```
 
 D1（`AUDIT_DB` / database `broker-audit`）schema：
 
 | 欄 | 型 | 說明 |
 | :-- | :-- | :-- |
-| `ts` | INTEGER | 秒 |
+| `ts` | TEXT | ISO8601 UTC（`new Date().toISOString()`） |
 | `kind` | TEXT | `claim` / `admin` |
+| `wants` | TEXT | JSON 陣列（claim 請求嘅 key） |
 | `actor` | TEXT NULL | `admin:current` / `admin:prev` / NULL |
 | `action` | TEXT | `claim` / `agent_put` / `secret_put` … |
 | `agent_id` | TEXT NULL | 目標 agent |
-| `outcome` | TEXT | `ok` / `error:<code>` |
+| `result` | TEXT | `ok` / `failed` / `partial` / `not_entitled` / `replay` / `rate_limited` … |
 | `ip_hash` | TEXT NULL | SHA-256(CF-Connecting-IP) 前 16 hex |
-| `detail` | TEXT | JSON（**永不含 secret 值**，只 name／長度／錯誤碼） |
+| `status` | INTEGER | HTTP status |
+| `ua` | TEXT | User-Agent |
+| `latency_ms` | INTEGER NULL | 預留 |
+| `details` | TEXT | JSON（**永不含 secret 值**，只 name／長度／錯誤碼） |
 
 遷移：`worker/migrations/0001_audit.sql`；`npx wrangler d1 migrations apply broker-audit --remote`。
 寫入喺 `ctx.waitUntil`，失敗只記 `audit:write_failed` 落 console，唔影響主流程。
