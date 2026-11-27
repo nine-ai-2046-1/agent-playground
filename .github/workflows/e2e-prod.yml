@@ -68,7 +68,7 @@ jobs:
           code=$(curl -sS -m 15 -o /tmp/health.json -w "%{http_code}" "$BROKER_URL/health")
           echo "status=$code body=$(cat /tmp/health.json)"
           test "$code" = 200
-          python3 -c "import json;d=json.load(open('/tmp/health.json'));assert d.get('ok') is True and d.get('ed25519') is True,d"
+          python3 -c "import json;d=json.load(open('/tmp/health.json'));assert d.get('ok') is True and d.get('ed25519') is True and d.get('encryption') is True,d"
 
       - name: 舊 /github-token 必須 404（未 opt-in）
         run: |

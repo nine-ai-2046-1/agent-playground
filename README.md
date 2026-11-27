@@ -151,8 +151,9 @@ secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其�
 | `GET /v1/agents` | 列 registry（公鑰只露前 12 字元） |
 | `GET /v1/agents/:id` | 單筆全值（供輪替／加 entitlement） |
 | `DELETE /v1/agents/:id` | 撤銷 agent |
-| `PUT /v1/secrets/:agentId/:name` | 存靜態 secret（`{"value":"…"}`） |
+| `PUT /v1/secrets/:agentId/:name` | 存靜態 secret（`{"value":"…"}`）；**落 KV 前自動信封加密** |
 | `DELETE /v1/secrets/:agentId/:name` | 刪靜態 secret |
+| `POST /v1/admin/reencrypt` | 把舊明文 `sec:*` 就地遷移成密文（回 `{migrated, already_encrypted, failed}`） |
 
 ### 舊相容 endpoint（默認已下架）
 
@@ -170,8 +171,30 @@ npx wrangler secret put LEGACY_REPOSITORIES     # 例：agent-playground（必�
 | Key | 內容 |
 | :-- | :-- |
 | `agent:<id>` | `{id, pubkey, status, entitlements, github{…}, created_at, updated_at}` |
-| `sec:<agent>:<name>` | 靜態 secret 原文（KV 本身已加密靜態儲存）|
+| `sec:<agent>:<name>` | 信封加密後嘅 JSON：`{v:1, alg:"A256GCM", iv, ct}`（AAD 綁 `<agent>:<name>`；KV 內**無明文**）|
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s（重放保護）|
+
+## 靜態 secret 加密（N3）
+
+Worker 收到 `PUT /v1/secrets/:agent/:name` 後**即刻用 AES-256-GCM 加密**才寫入 KV：
+
+| 項 | 設計 |
+| :-- | :-- |
+| 演算法 | AES-256-GCM，12-byte 隨機 IV |
+| 金鑰 | `BROKER_MASTER_KEY`（Worker secret，base64url 32 bytes） |
+| AAD | `sec|<agent>|<name>` — 搬 key／改 agent 名會解密失敗（防調包） |
+| KV 內 | `{"v":1,"alg":"A256GCM","iv":"…","ct":"…"}` — 無明文、無 metadata |
+| 舊資料 | 讀到非信封格式即當 legacy 明文（向後兼容），`POST /v1/admin/reencrypt` 可就地遷移 |
+| 未設 key | 寫入回 **503 `encryption_not_configured`**（fail closed，唔會偷偷存明文） |
+
+```bash
+# 一次性：產生 master key 並上載
+node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))' > ~/Doubao/secrets/broker-master-key.b64
+wrangler secret put BROKER_MASTER_KEY < ~/Doubao/secrets/broker-master-key.b64
+
+# 遷移舊明文（admin token 必備）
+curl -X POST "$BROKER_URL/v1/admin/reencrypt" -H "Authorization: Bearer $BROKER_ADMIN_TOKEN"
+```
 
 ## CI 驗證（生產 E2E）
 
@@ -190,13 +213,13 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 ## 已知限制
 
 1. **Cloudflare Access 未開**：Zero Trust Free 要綁信用卡（$0 但要授權超額收費），所以邊緣層未有 Access Service Token；現時保護全靠 Worker 內簽名驗證。
-2. 公鑰 registry 靠 admin token 寫入；admin token 仍係單一共享 secret（只作登記用，唔參與每次 claim）。
-3. `wants` 最多 12 項，`repositories` 最多 20 個。
-4. 舊 bearer endpoint 仍然存在，文件齊備後應下架。
+2. 公鑰 registry 靠 admin token 寫入；admin token 仍係單一共享 secret（只作登記用，唔參與每次 claim）。admin token 輪替屬 N2，未做。
+3. **Master key 單點**：`BROKER_MASTER_KEY` 只存喺 Worker secret 同本機 `~/Doubao/secrets/broker-master-key.b64`（600）。遺失即解唔到舊 secret（要重新 `secret-put`）；輪替要保留舊 key 做解密（kid 欄位已預留但未多 key）。
+4. `wants` 最多 12 項，`repositories` 最多 20 個。
+5. 舊 bearer endpoint 仍然存在，文件齊備後應下架。
 
 ## Roadmap
 
-- 每個 static secret 加密（envelope encryption，KV 內只存 ciphertext）
 - claim token 短期快取，減少 GitHub API 呼叫
 - Access / Service Token 作為第二層（要卡）
 - `broker run --env-file` 一次過注入多個 secret

@@ -62,7 +62,7 @@
 | Key | Value | 說明 |
 | :-- | :-- | :-- |
 | `agent:<id>` | JSON `{id, pubkey, status, entitlements[], github{installation_id,repositories[],permissions}, created_at, updated_at}` | `pubkey` = base64url(raw 32 bytes) |
-| `sec:<agent>:<name>` | 字串（原文）| 靜態 secret；`github` 唔用呢個 key |
+| `sec:<agent>:<name>` | JSON `{v:1, alg:"A256GCM", iv, ct}` | 靜態 secret 信封加密（AES-256-GCM，AAD=`sec\|<agent>\|<name>`）；`github` 唔用呢個 key；讀到非信封格式當 legacy 明文 |
 | `nonce:<agent>:<nonce>` | `"1"`，TTL 120s | 重放保護；**先寫後派**，寫失敗即拒絕 |
 
 命名規則（Worker 強制）：
@@ -133,8 +133,9 @@ v1|<agent_id>|<wants.join(",")>|<ts>|<nonce>
 | `GET /v1/agents` | 列表 | 公鑰只露前 12 字元 |
 | `GET /v1/agents/:id` | 單筆全值 | 供輪替／加 entitlement |
 | `DELETE /v1/agents/:id` | 撤銷 | 即刻 401 |
-| `PUT /v1/secrets/:agentId/:name` | 存靜態 secret | body `{value}` |
+| `PUT /v1/secrets/:agentId/:name` | 存靜態 secret | body `{value}`；加密後才落 KV；未設 `BROKER_MASTER_KEY` → 503 |
 | `DELETE /v1/secrets/:agentId/:name` | 刪 | |
+| `POST /v1/admin/reencrypt` | 遷移舊明文 | 掃 `sec:` prefix，逐個 decrypt→encrypt→put |
 
 Admin 認證：單一 `AGENT_TOKEN`，`safeEqual` 固定時間比較；錯誤只回 `401`。
 
@@ -184,7 +185,7 @@ Admin 認證：單一 `AGENT_TOKEN`，`safeEqual` 固定時間比較；錯誤只
 
 ```bash
 cd worker
-npx wrangler secret list                        # 應有 3 個
+npx wrangler secret list                        # 應有 4 個
 # 首次／輪替 PEM：
 openssl pkcs8 -topk8 -nocrypt -in app.pem -out app.pk8.pem
 openssl base64 -A -in <(openssl pkcs8 -topk8 -nocrypt -in app.pem -outform DER) > pem.base64.txt
@@ -192,7 +193,14 @@ npx wrangler secret put GITHUB_APP_PEM_BASE64 < pem.base64.txt
 npx wrangler deploy
 ```
 
-必要 secrets：`GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`、`AGENT_TOKEN`。
+必要 secrets：`GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`、`AGENT_TOKEN`、`BROKER_MASTER_KEY`（base64url 32 bytes；本機備份 `~/Doubao/secrets/broker-master-key.b64`，600）。
+
+```bash
+# N3 master key（一次性；輪替前要先加舊 key 支援解密，見 README 已知限制）
+node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))' > ~/Doubao/secrets/broker-master-key.b64
+npx wrangler secret put BROKER_MASTER_KEY < ~/Doubao/secrets/broker-master-key.b64
+npx wrangler deploy
+```
 KV：`wrangler.toml` 內 `[[kv_namespaces]] binding = "BROKER_KV"`。
 部署後只可驗 `/health`（生產 `/v1/claim` 需 agent 私鑰，且要網絡通）。
 
@@ -215,10 +223,10 @@ BROKER_URL=http://127.0.0.1:8787 broker claim github --agent opencode-01
 1. **契約測試（已入 repo）**：
 
 ```bash
-node worker/scripts/contract-test.mjs      # 16 項，自帶 mock KV，唔需要 wrangler／網絡
+node worker/scripts/contract-test.mjs      # 20 項，自帶 mock KV，唔需要 wrangler／網絡
 ```
 
-   覆蓋：health、admin 認證、未知 agent、錯簽、ts 過期、重放、無 entitlement、靜態 secret、撤銷、404、no-store 全覆蓋、舊 endpoint 默認下架 + 缺 allowlist 403。
+   覆蓋：health（含 `encryption` 旗標）、admin 認證、未知 agent、錯簽、ts 過期、重放、無 entitlement、靜態 secret、撤銷、404、no-store 全覆蓋、舊 endpoint 默認下架 + 缺 allowlist 403、**KV 內 sec:* 為密文**、legacy 明文兼容、`reencrypt` 遷移、未設 master key → 503。
    「真 mint GitHub token」唔在內（要真 PEM，屬生產／本機 `.dev.vars` 測試）。
 2. **CLI 退出碼**：
 

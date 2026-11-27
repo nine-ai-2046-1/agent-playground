@@ -66,6 +66,67 @@ function fromBase64Url(value) {
   return new Uint8Array(base64ToArrayBuffer(padded));
 }
 
+/** ====== N3：靜態 secret 信封加密（AES-256-GCM，AAD 綁 agent+name）====== */
+
+const ENC_VERSION = 1;
+const ENC_ALG = "A256GCM";
+
+/** 由 env BROKER_MASTER_KEY（base64url 32 bytes）取 key 位元組；唔合格回 null（fail closed） */
+function masterKeyBytes(env) {
+  const raw = String(env.BROKER_MASTER_KEY || "").trim();
+  if (!raw) return null;
+  try {
+    const bytes = fromBase64Url(raw);
+    return bytes.byteLength === 32 ? bytes : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function importMasterKey(env) {
+  const bytes = masterKeyBytes(env);
+  if (!bytes) return null;
+  return crypto.subtle.importKey("raw", bytes, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+function secretAad(agentId, name) {
+  return new TextEncoder().encode(`sec|${agentId}|${name}`);
+}
+
+/** 加密 → KV 存的字串（JSON 信封：v/alg/iv/ct；唔含任何明文 metadata） */
+async function encryptSecret(env, agentId, name, plaintext) {
+  const key = await importMasterKey(env);
+  if (!key) throw Object.assign(new Error("encryption_not_configured"), { status: 503 });
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: secretAad(agentId, name) },
+    key,
+    new TextEncoder().encode(plaintext),
+  );
+  return JSON.stringify({ v: ENC_VERSION, alg: ENC_ALG, iv: toBase64Url(iv), ct: toBase64Url(ct) });
+}
+
+/** 解密；舊格式（未加密明文）原樣回傳並標 legacy:true，方便遷移 */
+async function decryptSecret(env, agentId, name, stored) {
+  let envelope = null;
+  try {
+    envelope = JSON.parse(stored);
+  } catch (_) {
+    envelope = null;
+  }
+  const isEnvelope =
+    envelope && envelope.v === ENC_VERSION && envelope.alg === ENC_ALG && typeof envelope.ct === "string";
+  if (!isEnvelope) return { value: stored, legacy: true };
+  const key = await importMasterKey(env);
+  if (!key) throw Object.assign(new Error("encryption_not_configured"), { status: 503 });
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fromBase64Url(envelope.iv), additionalData: secretAad(agentId, name) },
+    key,
+    fromBase64Url(envelope.ct),
+  );
+  return { value: new TextDecoder().decode(plain), legacy: false };
+}
+
 /** 用 PEM（PKCS#8 base64）簽一張 10 分鐘 App JWT */
 async function createAppJwt(appId, pemBase64) {
   const key = await crypto.subtle.importKey(
@@ -197,10 +258,11 @@ async function resolveSecret(env, agentId, name, agent) {
       permissions: gh.permissions,
     });
   }
-  // 其他一律當「靜態 secret」：KV key sec:<agent>:<name>
+  // 其他一律當「靜態 secret」：KV key sec:<agent>:<name>（信封加密，AAD 綁 agent+name）
   const raw = await env.BROKER_KV.get(`sec:${agentId}:${name}`, "text");
   if (raw === null) throw Object.assign(new Error("secret_not_found"), { status: 404 });
-  return { value: raw };
+  const decrypted = await decryptSecret(env, agentId, name, raw);
+  return { value: decrypted.value, encrypted: !decrypted.legacy };
 }
 
 /** ====== audit log ====== */
@@ -251,7 +313,16 @@ export default {
     // 公開健康檢查（唔驗 auth，唔洩任何設定）
     if (url.pathname === "/health" && request.method === "GET") {
       return finish(
-        json({ ok: true, version: "v2", kv: Boolean(env.BROKER_KV), ed25519: true }, 200),
+        json(
+          {
+            ok: true,
+            version: "v2",
+            kv: Boolean(env.BROKER_KV),
+            ed25519: true,
+            encryption: Boolean(masterKeyBytes(env)),
+          },
+          200,
+        ),
       );
     }
 
@@ -348,9 +419,11 @@ export default {
       });
 
       if (Object.keys(secrets).length === 0) {
-        return finish(
-          json({ error: "claim_failed", details: errors }, errors.some((e) => e.status === 404) ? 404 : 500),
-        );
+        // 單一原因時保留其狀態（404 找唔到／503 未設 master key／500 真故障），混合就 500
+        const statuses = errors.map((e) => e.status);
+        const failStatus =
+          statuses.every((s) => s === 404) ? 404 : statuses.every((s) => s === 503) ? 503 : 500;
+        return finish(json({ error: "claim_failed", details: errors }, failStatus));
       }
 
       return finish(
@@ -368,7 +441,10 @@ export default {
     }
 
     /* ===================== 管理 API（Bearer AGENT_TOKEN = admin）===================== */
-    const adminPaths = url.pathname.startsWith("/v1/agents") || url.pathname.startsWith("/v1/secrets");
+    const adminPaths =
+      url.pathname.startsWith("/v1/agents") ||
+      url.pathname.startsWith("/v1/secrets") ||
+      url.pathname.startsWith("/v1/admin");
     if (adminPaths) {
       if (!env.AGENT_TOKEN) return finish(json({ error: "broker misconfigured" }, 500));
       const header = request.headers.get("Authorization") || "";
@@ -441,14 +517,47 @@ export default {
         if (!/^[a-z0-9][a-z0-9._-]{0,47}$/.test(name)) return finish(json({ error: "invalid_secret_name" }, 400));
         const body = await request.json().catch(() => null);
         if (!body || body.value === undefined) return finish(json({ error: "missing_value" }, 400));
-        await env.BROKER_KV.put(`sec:${agentId}:${name}`, String(body.value));
-        return finish(json({ stored: { agent: agentId, name } }, 201));
+        let stored;
+        try {
+          stored = await encryptSecret(env, agentId, name, String(body.value));
+        } catch (error) {
+          return finish(json({ error: sanitizeDetail(error && error.message) }, error.status || 503));
+        }
+        await env.BROKER_KV.put(`sec:${agentId}:${name}`, stored);
+        return finish(json({ stored: { agent: agentId, name, encrypted: true } }, 201));
       }
 
       // DELETE /v1/secrets/:agentId/:name
       if (parts[1] === "secrets" && parts.length === 4 && request.method === "DELETE") {
         await env.BROKER_KV.delete(`sec:${parts[2]}:${parts[3]}`);
         return finish(json({ deleted: { agent: parts[2], name: parts[3] } }, 200));
+      }
+
+      // POST /v1/admin/reencrypt  （把舊明文 sec:* 就地改寫成信封加密）
+      if (parts[1] === "admin" && parts[2] === "reencrypt" && request.method === "POST") {
+        if (!masterKeyBytes(env)) return finish(json({ error: "encryption_not_configured" }, 503));
+        const list = await env.BROKER_KV.list({ prefix: "sec:" });
+        let migrated = 0;
+        let skipped = 0;
+        const failed = [];
+        for (const k of list.keys) {
+          const keyParts = k.name.split(":"); // ["sec", agentId, name]
+          if (keyParts.length !== 3) continue;
+          try {
+            const raw = await env.BROKER_KV.get(k.name, "text");
+            if (raw === null) continue;
+            const dec = await decryptSecret(env, keyParts[1], keyParts[2], raw);
+            if (!dec.legacy) {
+              skipped += 1;
+              continue;
+            }
+            await env.BROKER_KV.put(k.name, await encryptSecret(env, keyParts[1], keyParts[2], dec.value));
+            migrated += 1;
+          } catch (error) {
+            failed.push({ key: k.name, error: sanitizeDetail(error && error.message) });
+          }
+        }
+        return finish(json({ migrated, already_encrypted: skipped, failed: failed.length, details: failed }, 200));
       }
 
       return finish(new Response("Not Found", { status: 404 }));

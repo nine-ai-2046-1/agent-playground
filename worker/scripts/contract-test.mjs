@@ -62,9 +62,12 @@ function check(name, ok, detail = "") {
 
 async function main() {
   const kv = makeKV();
+  // N3：測試用 master key（32 bytes → base64url）
+  const MASTER = Buffer.from("0123456789abcdef0123456789abcdef").toString("base64url");
   const env = {
     BROKER_KV: kv,
     AGENT_TOKEN: ADMIN,
+    BROKER_MASTER_KEY: MASTER,
     GITHUB_APP_ID: "123",
     GITHUB_APP_PEM_BASE64: "unused-in-contract-test",
   };
@@ -228,6 +231,68 @@ async function main() {
   check("所有抽查回應都有 Cache-Control: no-store",
     probes.every((r) => r.headers.get("cache-control") === "no-store"),
     probes.map((r) => r.status).join(","));
+
+  /* 17. N3：KV 內靜態 secret 必須係密文（唔可以見明文） */
+  const storedRaw = kv._raw.get(`sec:${AGENT}:static.key`) || "";
+  let envelopeOk = false;
+  try {
+    const env0 = JSON.parse(storedRaw);
+    envelopeOk = env0.v === 1 && env0.alg === "A256GCM" && typeof env0.ct === "string" && env0.iv.length > 0;
+  } catch (_) {
+    envelopeOk = false;
+  }
+  check("KV 內 sec:* 為密文信封（無明文）",
+    envelopeOk && !storedRaw.includes("s3cr3t-value"),
+    `envelope=${envelopeOk} 明文出現=${storedRaw.includes("s3cr3t-value")}`);
+
+  /* 18. 舊明文 secret 可讀（legacy 兼容） */
+  await jsonCall(`/v1/agents/${OTHER}`, "PUT",
+    { pubkey: B.rawPub, entitlements: ["other.key", "legacy.key"] }, ADMIN);
+  await kv.put(`sec:${OTHER}:legacy.key`, "legacy-plaintext-value");
+  const lgTs = Math.floor(Date.now() / 1000);
+  const lgNonce = "nonce00000008";
+  const lgRes = await call("/v1/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      agent_id: OTHER, wants: ["legacy.key"], ts: lgTs, nonce: lgNonce,
+      sig: sign(B.privateKey, OTHER, ["legacy.key"], lgTs, lgNonce),
+    }),
+  });
+  const lgBody = await lgRes.json();
+  check("舊明文 secret 仍可 claim（遷移兼容）",
+    lgRes.status === 200 && lgBody.secrets?.["legacy.key"]?.value === "legacy-plaintext-value",
+    `status=${lgRes.status}`);
+
+  /* 19. reencrypt 把舊明文就地改寫成密文 */
+  const re = await jsonCall("/v1/admin/reencrypt", "POST", {}, ADMIN);
+  const reBody = await re.json();
+  const lgRawAfter = kv._raw.get(`sec:${OTHER}:legacy.key`) || "";
+  const lgTs2 = Math.floor(Date.now() / 1000);
+  const lgNonce2 = "nonce00000009";
+  const lgRes2 = await call("/v1/claim", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      agent_id: OTHER, wants: ["legacy.key"], ts: lgTs2, nonce: lgNonce2,
+      sig: sign(B.privateKey, OTHER, ["legacy.key"], lgTs2, lgNonce2),
+    }),
+  });
+  const lgBody2 = await lgRes2.json();
+  check("reencrypt 後 KV 為密文、claim 仍正確",
+    re.status === 200 && reBody.migrated >= 1 && !lgRawAfter.includes("legacy-plaintext-value") &&
+      lgRes2.status === 200 && lgBody2.secrets?.["legacy.key"]?.value === "legacy-plaintext-value",
+    `migrated=${reBody.migrated} claim=${lgRes2.status}`);
+
+  /* 20. 未設 master key → 存 secret 503（fail closed，唔會偷偷存明文） */
+  const noKeyEnv = { ...env, BROKER_MASTER_KEY: undefined };
+  const noKeyPut = await worker.fetch(
+    new Request(`https://broker.test/v1/secrets/${OTHER}/no-key`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", authorization: `Bearer ${ADMIN}` },
+      body: JSON.stringify({ value: "x" }),
+    }), noKeyEnv);
+  check("未設 BROKER_MASTER_KEY → 存 secret 回 503", noKeyPut.status === 503, `status=${noKeyPut.status}`);
 
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} PASS${failed.length ? `，${failed.length} FAIL` : ""}`);
