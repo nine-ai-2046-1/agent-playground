@@ -1,16 +1,16 @@
 {
-  "at": "2026-11-27T16:50:34Z",
-  "commit": "52935eca07c5031cfd698bdcd622c69a334be516",
-  "runner": "GitHub Actions 1000000188",
+  "at": "2026-11-27T16:54:31Z",
+  "commit": "73a6a6b8e4a3da63fb1ed8115e20d98312815baa",
+  "runner": "GitHub Actions 1000000189",
   "broker": "https://github-token-broker.baobao2046.workers.dev",
   "agent": "ci-e2e-01",
   "hasKey": true,
   "result": "success",
-  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/46036828967",
+  "runUrl": "https://github.com/nine-ai-2046-1/agent-playground/actions/runs/46037322858",
   "claim": {
     "prefix": "ghs_",
     "len": 390,
-    "expires_at": "2026-11-27T17:49:41Z",
+    "expires_at": "2026-11-27T17:53:19Z",
     "permissions": {
       "pages": "write",
       "issues": "write",
