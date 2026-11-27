@@ -41,7 +41,8 @@ grok     ─┘   (Worker 驗簽)         └─ 靜態 secret（SMTP app passwo
 
 ```bash
 # A. 一鍵（需要 fine-grained PAT：只勾 Contents:Read、只限本 repo）
-GH_TOKEN='<token>' bash scripts-bootstrap-install.sh
+read -rsp 'GitHub read token: ' GH_TOKEN && echo
+GH_TOKEN="$GH_TOKEN" bash scripts-bootstrap-install.sh
 
 # B. 已經手動 clone 落機（完全離線，唔需要 token）
 git clone https://github.com/nine-ai-2046-1/agent-playground.git ~/src/agent-playground
@@ -105,7 +106,7 @@ broker exec --keys smtp.password -- sh -c 'echo ${#SMTP_PASSWORD}'
 環境變數：`BROKER_URL`（覆蓋 broker 網址）、`BROKER_AGENT_ID`（預設 agent）、`BROKER_ADMIN_TOKEN`（admin）。
 環境變數優先於 `~/.config/secret-broker/config.json`。
 
-CLI 退出碼：`0` 成功、`1` 執行錯誤、`2` 用法錯誤；claim 專用 `3` 401、`4` 403、`5` 404、`6` 409。
+CLI 退出碼：`0` 成功、`1` 執行錯誤、`2` 用法錯誤（包括冇打指令、缺參數、agent id 格式錯）；claim 專用 `3` 401、`4` 403、`5` 404、`6` 409。
 
 secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其他 key 大寫、非英數轉底線（`smtp.password` → `SMTP_PASSWORD`）。
 
@@ -137,8 +138,8 @@ secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其�
 
 | 情況 | 回應 |
 | :-- | :-- |
-| 簽名錯 / agent 不存在 / 已撤銷 | `401`（不分開講原因，防枚舉） |
-| `ts` 超出 ±60s | `401 stale_or_skewed_timestamp` |
+| 簽名錯 / agent 不存在 / 已撤銷（身份類） | `401` plain `Unauthorized`（唔分原因，防枚舉） |
+| `ts` 超出 ±60s | `401 stale_or_skewed_timestamp`（時間類錯誤會講原因，方便校時） |
 | nonce 重用 | `409 replay_detected` |
 | 未在 `entitlements` | `403 not_entitled`（列出 `denied`） |
 
@@ -148,13 +149,21 @@ secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其�
 | :-- | :-- |
 | `PUT /v1/agents/:id` | 登記 / 輪替公鑰（`pubkey`, `entitlements`, `github{installation_id,repositories,permissions}`） |
 | `GET /v1/agents` | 列 registry（公鑰只露前 12 字元） |
+| `GET /v1/agents/:id` | 單筆全值（供輪替／加 entitlement） |
 | `DELETE /v1/agents/:id` | 撤銷 agent |
 | `PUT /v1/secrets/:agentId/:name` | 存靜態 secret（`{"value":"…"}`） |
 | `DELETE /v1/secrets/:agentId/:name` | 刪靜態 secret |
 
-### 舊相容 endpoint
+### 舊相容 endpoint（默認已下架）
 
-`POST /github-token`（Bearer `AGENT_TOKEN`）保留做回歸測試，唔建議新 agent 用。
+`POST /github-token`（Bearer `AGENT_TOKEN`）默認回 `404`。只做回歸測試時才開：
+
+```bash
+npx wrangler secret put LEGACY_BEARER_ENABLED   # 值 "true"
+npx wrangler secret put LEGACY_REPOSITORIES     # 例：agent-playground（必填）
+```
+
+冇 `LEGACY_REPOSITORIES` 時回 `403 legacy_repo_allowlist_missing`，避免 mint 出全 installation 範圍的 token。
 
 ## KV 結構（`BROKER_KV`）
 
@@ -186,4 +195,4 @@ secret key → 環境變數：`github` → `GH_TOKEN` 及 `GITHUB_TOKEN`；其�
 | `agents/TECH.md` | 接手的 developer agent | 架構、API 契約、KV 模型、部署／發版／測試 playbook、已知陷阱 |
 | `agents/AUDIT.md` | audit agent | 宣稱清單、控制清單、風險登記冊（P0–P2）、audit playbook、測試案例、證據要求 |
 
-審核基線（2026-11-27）：Worker 版本 `2b104aaf`、CLI `0.3.0`、生產 registry 只有 `opencode-01`、Access 未開。
+審核基線（2026-11-27 修復後）：Worker 版本 `82bbb354`、CLI `0.4.0`、生產 registry 只有 `opencode-01`、Access 未開。

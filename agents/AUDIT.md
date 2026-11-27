@@ -87,11 +87,13 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | entitlement 白名單 | `agent.entitlements` | 逐 key 檢查；`wants` 最多 12 項 |
 | Admin 認證 | `safeEqual()` 固定時間比較 `AGENT_TOKEN` | 管理 API 專用 |
 | 最小回應 | mint token 只回 `token/expires_at/permissions` | 唔 spread GitHub 原始 response |
-| No-store | 所有回應 `Cache-Control: no-store` | 防快取殘留 |
+| No-store | `finish()` 統一補 `Cache-Control: no-store` | 包括 plain-text 401/404（2026-11-27 修復後已全覆蓋；修前只有 JSON 回應有） |
 | 遮罩輸出 | CLI `maskValue()` | `sha256:xxxxxxxx len=N` |
 | 私鑰存放 | Keychain `secret-broker-key:<agent>` | 非 macOS 用 600 檔 |
 | 安裝安全 | `scripts-bootstrap-install.sh` | token 走 `GIT_ASKPASS`，唔入 argv；`GIT_TERMINAL_PROMPT=0` |
 | Secret 不入 repo | `.gitignore`（`.dev.vars`、`*.pem`、`*.base64.txt`）| 已掃過全 git 歷史：零 PEM／零 token 真值 |
+| 可重跑契約測試 | `worker/scripts/contract-test.mjs` | 16 項，自帶 mock KV，無需 wrangler／網絡；CI 可直接跑 |
+| argv 洩漏防線 | CLI 刻意唔接受 `--value`、`--admin-token` | secret 只經 stdin／env／Keychain |
 
 ---
 
@@ -126,7 +128,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | R11 | 假 broker／MITM | 回應冇簽名；config `brokerUrl` 明文可改 | broker 回應簽名 + CLI 公鑰 pin；config 加 pin |
 | R12 | 本機殘留 | `.dev.vars`（3 secrets）、`~/Downloads/*.pem` 仍在 | 搬 `~/Doubao/secrets/`（600）或入 Keychain；刪副本 |
 | R13 | 撤銷後仍可能短暫可用 | KV 一致性 + token 已 mint（最長 1 小時）| 文件講清楚：撤銷 = 停止**新** token，已發 token 自然到期 |
-| R14 | 舊 `/github-token` endpoint 仍在 | 舊 bearer flow 未下架 | 評估下架（會影響 V1/V2 回歸測試）|
+| R14 | 舊 `/github-token` endpoint | **已默認下架**：無 `LEGACY_BEARER_ENABLED=true` 一律 404；啟用時必須有 `LEGACY_REPOSITORIES` allowlist，否則 403 | 保留 opt-in 供 V1/V2 回歸；長期可完全刪碼 |
 
 ---
 
@@ -242,13 +244,48 @@ audit/<YYYY-MM-DD>/
 
 | 項目 | 值 |
 | :-- | :-- |
-| Worker 版本 | `2b104aaf-ddc4-4cd2-bf41-47be0737c65c` |
+| Worker 版本 | `82bbb354-7aa6-4516-807e-77f4dc24aad1`（2026-11-27 修復批次部署）|
 | Worker URL | `https://github-token-broker.baobao2046.workers.dev` |
 | KV namespace | `BROKER_KV` = `dd244113e11148c883325bc4d3cfde3c` |
 | 生產 registry | 只有 `agent:opencode-01`（entitlements `github`，repo 限 `agent-playground`）|
 | Cloudflare | account `f00aad142d5151b962fc5af7bcd88395`、subdomain `baobao2046` |
 | GitHub App | App ID `5918124`、Installation `185701417`、`repository_selection = all` |
-| CLI | `@nine-ai/secret-broker-cli` 0.3.0、repo `nine-ai-2046-1/agent-playground`（private）|
+| CLI | `@nine-ai/secret-broker-cli` 0.4.0、repo `nine-ai-2046-1/agent-playground`（private）|
 | 已知死路 | 本機／雲機／瀏覽器都連唔到 workers.dev；Access 需要信用卡 |
 
 > 任何與上表不符嘅情況，**以實測為準**，並在報告標明差異。
+
+---
+
+## 13. 2026-11-27 修復批次（回應獨立 audit）
+
+> 由 MainAgent 執行；每項附驗證方式。未修項留在上面風險表，唔會被此節「洗白」。
+
+| # | audit 發現 | 修法 | 驗證 |
+| :-- | :-- | :-- | :-- |
+| F1 | 退出碼契約混亂（缺參數→1、無指令→0） | 新增 `usageDie()`：用法類錯誤一律 exit 2；無指令呼叫亦 exit 2 | 實測：無參 2、`init` 缺 `--agent` 2、未知指令 2 |
+| F2 | `--admin-token`／`secret-put --value` 令 token 走 argv | 兩者移除；admin token 只讀 env／Keychain；secret 只讀 stdin | `grep admin-token dist/index.js` 只剩註解／help 文字；`--admin-token` 不再被解析 |
+| F3 | plain-text 401/404 無 `Cache-Control: no-store` | `finish()` 統一補 header | 契約測試第 16 項：200/401/404/400 全部有 no-store |
+| F4 | 舊 `/github-token` 仍可 mint 全範圍 token | 默認 404；opt-in 需 `LEGACY_BEARER_ENABLED=true` + `LEGACY_REPOSITORIES` allowlist，缺則 403；mint 帶 repositories | 契約測試第 14/15 項 |
+| F5 | 契約測試腳本未入 repo | 新增 `worker/scripts/contract-test.mjs`（16 項、mock KV） | `node worker/scripts/contract-test.mjs` → 16/16 PASS |
+| F6 | `prepare` 無 dist 守衛（文件同實作不符） | 改為 `test -f dist/index.js \|\| tsc \|\| true` | fresh clone `npm pack` 無 tsc 噪音 |
+| F7 | TECH JWT 參數寫錯（-30s／+540s） | 改為 `-60s`／`+600s`（對齊 code） | 對照 `worker/src/index.js:13-14,81-82` |
+| F8 | README 401 全稱措辭、缺 `GET /v1/agents/:id` | 收窄為「身份類錯誤」，補齊管理 API 表 | 對照 worker 路由 |
+| F9 | 安裝範例令 token 入 shell history | 改用 `read -rsp` 提示輸入 | 文件審視 |
+
+### 仍未修（需用戶／設定層動作）
+
+| # | 項目 | 為何未修 | 下一步 |
+| :-- | :-- | :-- | :-- |
+| N1 | GitHub App installation = all（82 repo） | 要 repo owner 在 GitHub App 設定改；installation token 無權改自己範圍 | 你喺 App 頁面「Configure」改為 only `agent-playground`，或另建只讀 App |
+| N2 | Admin token 單點、無 rotation／rate limit | 屬設計改動（S10 級） | 建議下一步：admin 也走 Ed25519 + 雙 token 輪替 |
+| N3 | 靜態 secret 原文存 KV | 需 envelope encryption 設計 | Roadmap 第 1 項 |
+| N4 | audit log 只 console.log | 需 D1／R2 或 Logpush | Roadmap 第 6 項 |
+| N5 | CLI 安裝仍可跟 HEAD | 需 release tarball＋checksum 或 pin 政策 | README 已寫 pin 建議，未機械強制 |
+| N6 | 本機殘留 `.dev.vars`／`~/Downloads/*.pem` | 要你決定搬去邊 | 建議 `~/Doubao/secrets/`（600）或入 Keychain 後刪 |
+
+### 此批次的新基線
+
+- CLI：`0.4.0`（未發布到任何 registry；由 repo tarball 安裝）
+- Worker：已部署 `82bbb354-7aa6-4516-807e-77f4dc24aad1`（契約變更：no-store 全覆蓋、舊 endpoint 默認 404）
+- 契約測試：16/16 PASS（本地 mock KV；生產仍未實跑，見 O1）

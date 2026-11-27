@@ -138,9 +138,9 @@ v1|<agent_id>|<wants.join(",")>|<ts>|<nonce>
 
 Admin 認證：單一 `AGENT_TOKEN`，`safeEqual` 固定時間比較；錯誤只回 `401`。
 
-### 5.4 舊相容 endpoint
+### 5.4 舊相容 endpoint（默認下架）
 
-`POST /github-token`（Bearer `AGENT_TOKEN`）保留做回歸測試，**新功能唔好再依賴**；S9 應評估下架。
+`POST /github-token` 默認回 `404`。只有 `LEGACY_BEARER_ENABLED=true` 才啟用，並且必須設 `LEGACY_REPOSITORIES`（逗號分隔）；缺 allowlist → `403 legacy_repo_allowlist_missing`。啟用時 mint 只限 allowlist 內 repo。
 
 ## 6. CLI 內部結構（`src/index.ts`）
 
@@ -152,7 +152,7 @@ Admin 認證：單一 `AGENT_TOKEN`，`safeEqual` 固定時間比較；錯誤只
 | 身份 | `cmdInit`、`cmdWhoami`、`cmdPubkey`、`cmdRotate` |
 | claim | `signPayload` → `doClaim`（含退出碼映射）→ `cmdClaim`（遮罩／`--print`／`--env`）|
 | exec | `cmdExec`：claim → 注入 env → `spawnSync`，回傳子進程 exit code |
-| admin | `cmdRegister`、`cmdAgents`、`cmdSecretPut`、`cmdAdminLogin`；admin token 讀 `BROKER_ADMIN_TOKEN` 或 Keychain `secret-broker-admin` |
+| admin | `cmdRegister`、`cmdAgents`、`cmdSecretPut`、`cmdAdminLogin`；admin token 只讀 `BROKER_ADMIN_TOKEN`（env）或 Keychain `secret-broker-admin`；**刻意唔接受 `--admin-token`**（argv 會外洩）|
 
 **退出碼契約**（agent 依賴它分流，唔可以隨便改）：
 
@@ -160,7 +160,7 @@ Admin 認證：單一 `AGENT_TOKEN`，`safeEqual` 固定時間比較；錯誤只
 | :-- | :-- |
 | 0 | 成功 |
 | 1 | 執行錯誤（網絡、Keychain、本機私鑰）|
-| 2 | 用法錯誤（未知指令）|
+| 2 | 用法錯誤（冇指令／缺參數／格式錯）|
 | 3 | claim 收到 401 |
 | 4 | claim 收到 403 |
 | 5 | claim 收到 404 |
@@ -175,7 +175,7 @@ Admin 認證：單一 `AGENT_TOKEN`，`safeEqual` 固定時間比較；錯誤只
 | agent 公鑰 | base64url(32 bytes raw Ed25519 public key) |
 | agent 私鑰 | Keychain 內 PKCS#8 DER |
 | GitHub App PEM | Cloudflare Secret `GITHUB_APP_PEM_BASE64` = base64(**純 DER**)；Worker 另備容錯層，接受整份 PEM 文字（base64 後）|
-| App JWT | RS256，`iat-30s`、`exp+540s`、`iss=AppID` |
+| App JWT | RS256，`iat = now-60s`（`JWT_IAT_SKEW_SECONDS=60`）、`exp = now+600s`（10 分鐘上限）、`iss=AppID` |
 
 > 歷史陷阱：曾把整份含 `-----BEGIN…` 護欄的 PEM 文字 base64 上傳，導致 `importKey` 失敗。
 > 正確做法是 `openssl pkcs8 -topk8 -nocrypt` 轉 PKCS#8，再抽 DER base64（1 個連續字串、無換行）。
@@ -212,8 +212,14 @@ BROKER_URL=http://127.0.0.1:8787 broker claim github --agent opencode-01
 
 ## 10. 測試 playbook（改碼後必跑）
 
-1. **契約測試 10 項**（重放 409、錯簽 401、ts 過期 401、未授權 403、未知 agent 401、靜態 secret 200、撤銷後 401、管理 API 無 token 401、真 mint token、audit 無 secret 值）。
-   建議保留一支可重跑腳本（舊位置 `/tmp/.s6/claim-test.mjs` 已屬臨時檔，應收進 `worker/scripts/`）。
+1. **契約測試（已入 repo）**：
+
+```bash
+node worker/scripts/contract-test.mjs      # 16 項，自帶 mock KV，唔需要 wrangler／網絡
+```
+
+   覆蓋：health、admin 認證、未知 agent、錯簽、ts 過期、重放、無 entitlement、靜態 secret、撤銷、404、no-store 全覆蓋、舊 endpoint 默認下架 + 缺 allowlist 403。
+   「真 mint GitHub token」唔在內（要真 PEM，屬生產／本機 `.dev.vars` 測試）。
 2. **CLI 退出碼**：
 
 ```bash
@@ -249,7 +255,7 @@ npm pack --silent && npm i -g --force ./<tarball>.tgz
 | 12.4 | 跨域 XHR | dashboard → worker 的 fetch 被 CORS 擋 | 必須先導航到 worker 同源再請求 |
 | 12.5 | `npm_config_prefix` | `command -v broker` 揾到舊版，誤以為升級成功 | 用 `$(npm root -g)/@nine-ai/secret-broker-cli/package.json` 核版本 |
 | 12.6 | KV 最終一致 | nonce 檢查跨 region 可能延遲 | 若要求嚴格，改用 Durable Object 做 nonce 單點 |
-| 12.7 | `prepare` 觸發 tsc | fresh clone 冇 `node_modules` 時爆 `Cannot find name 'process'` | `prepare` 已改為「dist 存在就跳過」；新增 devDep 時要留意 |
+| 12.7 | `prepare` 觸發 tsc | fresh clone 冇 `node_modules` 時爆 `Cannot find name 'process'` | `prepare = test -f dist/index.js \|\| tsc \|\| true`（已守衛）；**發版前仍要 `npm i` 裝 devDeps 再 build** |
 | 12.8 | Cloudflare Access | 一鍵 Access 要 Zero Trust onboarding → 要信用卡 | 已暫緩；邊緣保護目前只靠簽名 + 可加免費 WAF rate limit |
 
 ## 13. Roadmap 與 Linear 對應
@@ -278,7 +284,8 @@ npm pack --silent && npm i -g --force ./<tarball>.tgz
 
 - 文件用**粵語**、point form／表格；程式註解可中英混合但變數名英文。
 - commit message 用 `feat(cli):` / `fix(bootstrap):` / `chore(release):` 這類前綴。
-- `dist/index.js` 必須同 `src/index.ts` 同步 commit（唔可以只推 src）。
+- `dist/index.js` 必須同 `src/index.ts` 同步 commit（唔可以只推 src）；build 前先 `npm i`（devDeps 唔入 repo）。
+所有 secret 值只可經 stdin／env／Keychain 傳；唔准新增任何「secret 走 argv」的旗標。
 - 任何改動影響 API／KV／退出碼，**同時**更新 `README.md`、`agents/TECH.md`、`agents/START.md`。
 - 生產 secret 一律用 `wrangler secret put`；KV 應急寫入要在 issue 標明 caveat。
 - 安裝要用 pin commit（`git+https://…#<sha>`）或 tarball，唔好跟隨 `main` HEAD。

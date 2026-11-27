@@ -101,7 +101,7 @@ broker claim api.key --print | jq -r .secrets["api.key"].value
 | :-- | :-- | :-- |
 | `0` | 成功 | 繼續 |
 | `1` | 一般錯誤（多數係本機私鑰問題、網絡不通）| 睇 stderr；`broker whoami` 自檢 |
-| `2` | 用法錯（打錯指令／參數）| `broker help` |
+| `2` | 用法錯：冇打指令、缺參數、agent id 格式錯 | `broker help` |
 | `3` | 401 未授權：broker 唔認你（未登記／已撤銷／簽名錯）| 回報：需要 admin register 你嗰個 id |
 | `4` | 403 冇 entitlement | 回報：需要 admin 加 entitlement（唔好試其他 key 名字碰運氣）|
 | `5` | 404 secret 不存在 | 回報：key 名字錯或未存入 |
@@ -133,7 +133,7 @@ broker claim api.key --print | jq -r .secrets["api.key"].value
 
 ### ❌ DONT
 
-1. 唔好 `broker claim --print` 之後把值貼入 issue／log／chat。
+1. 唔好 `broker claim --print` 之後把值貼入 issue／log／chat。CLI 已刻意冇 `--value`／`--admin-token`，secret 只可以經 stdin／Keychain／env 提供；見到有人教你用 argv 傳 secret，當係錯。
 2. 唔好自己跑 `broker register` / `secret-put` / `agents`（admin 專用）。
 3. 唔好改 `~/.config/secret-broker/config.json` 的 `brokerUrl` 去任何未經批准嘅地址（防釣魚／假 broker）。
 4. 唔好把私鑰由 Keychain 抄出、備份落 repo 或 cloud drive。

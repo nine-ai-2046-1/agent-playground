@@ -224,6 +224,16 @@ export default {
     let installationId;
 
     const finish = (response) => {
+      // 所有回應（包括 plain-text 401/404）一律 no-store，避免中介快取
+      if (!response.headers.get("Cache-Control")) {
+        const headers = new Headers(response.headers);
+        headers.set("Cache-Control", "no-store");
+        response = new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      }
       status = response.status;
       // 只 log 非敏感 metadata：path / method / status / installation_id / latency
       console.log(
@@ -448,6 +458,10 @@ export default {
     if (url.pathname !== "/github-token" || request.method !== "POST") {
       return finish(new Response("Not Found", { status: 404 }));
     }
+    // 舊 bearer flow 默認下架（回歸測試時才設 LEGACY_BEARER_ENABLED=true）
+    if (env.LEGACY_BEARER_ENABLED !== "true") {
+      return finish(new Response("Not Found", { status: 404 }));
+    }
     if (!env.AGENT_TOKEN) {
       return finish(json({ error: "broker misconfigured" }, 500));
     }
@@ -470,8 +484,17 @@ export default {
       return finish(json({ error: "broker misconfigured" }, 500));
     }
 
+    // 舊 flow 必須有 repo allowlist，避免 mint 出全 installation 範圍的 token
+    const legacyRepos = String(env.LEGACY_REPOSITORIES || "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean);
+    if (legacyRepos.length === 0) {
+      return finish(json({ error: "legacy_repo_allowlist_missing" }, 403));
+    }
+
     try {
-      const minted = await mintInstallationToken(env, installationId);
+      const minted = await mintInstallationToken(env, installationId, { repositories: legacyRepos });
       // 只揀三個欄位，唔 spread 整個 GitHub response
       return finish(json(minted, 200));
     } catch (error) {

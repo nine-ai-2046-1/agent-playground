@@ -27,6 +27,12 @@ function die(message, code = 1) {
     console.error(`✖ ${message}`);
     process.exit(code);
 }
+/** 用法錯誤一律 exit 2（同 README／START 的退出碼契約一致） */
+function usageDie(message) {
+    console.error(`✖ ${message}`);
+    console.error("  用法：broker help");
+    process.exit(2);
+}
 function parseFlags(argv) {
     const flags = {};
     const positional = [];
@@ -101,7 +107,7 @@ function writeConfig(config) {
 function resolveAgent(config, flags) {
     const agent = flagString(flags, "agent") || process.env.BROKER_AGENT_ID || config.agentId;
     if (!agent)
-        die("未指定 agent；先跑 `broker init --agent <id>` 或用 --agent 指定");
+        usageDie("未指定 agent；先跑 `broker init --agent <id>` 或用 --agent 指定");
     return agent;
 }
 // ------------------------------------------------------------- key material
@@ -194,10 +200,8 @@ async function callBroker(config, method, pathname, body, adminToken) {
     }
     return { status: response.status, json };
 }
-function adminToken(flags) {
-    const fromFlag = flagString(flags, "admin-token");
-    if (fromFlag)
-        return fromFlag;
+function adminToken(_flags) {
+    // 刻意唔接受 --admin-token：token 走 argv 會出現在 shell history 同 process list
     if (process.env.BROKER_ADMIN_TOKEN)
         return process.env.BROKER_ADMIN_TOKEN;
     if (isMac) {
@@ -207,7 +211,7 @@ function adminToken(flags) {
         if (res.status === 0 && res.stdout.trim())
             return res.stdout.trim();
     }
-    die("冇 admin token；設 BROKER_ADMIN_TOKEN 或 --admin-token，或先 `broker admin-login --token-stdin`");
+    die("冇 admin token；設 BROKER_ADMIN_TOKEN（env）或先 `broker admin-login --token-stdin`");
 }
 // ---------------------------------------------------------------- env names
 function envNameFor(secretKey) {
@@ -232,9 +236,9 @@ async function cmdHealth(config) {
 function cmdInit(flags) {
     const agentId = flagString(flags, "agent");
     if (!agentId)
-        die("用法：broker init --agent <id> [--broker-url <url>] [--force]");
+        usageDie("用法：broker init --agent <id> [--broker-url <url>] [--force]");
     if (!/^[a-z0-9][a-z0-9._-]{1,47}$/.test(agentId))
-        die("agent id 只可以用細寫英數、. _ -，2–48 字元");
+        usageDie("agent id 只可以用細寫英數、. _ -，2–48 字元");
     const config = readConfig();
     const brokerUrl = (flagString(flags, "broker-url") || config.brokerUrl).replace(/\/+$/, "");
     const existing = isMac ? keychainLoad(agentId) : readFileQuiet(fileKeyPath(agentId));
@@ -261,7 +265,7 @@ function cmdPubkey(config, flags) {
     console.log(derivePublicKey(agent));
 }
 async function cmdRegister(config, flags) {
-    const agent = flagString(flags, "agent") || die("用法：broker register --agent <id> [--pubkey <raw>] [--entitlements a,b]");
+    const agent = flagString(flags, "agent") || usageDie("用法：broker register --agent <id> [--pubkey <raw>] [--entitlements a,b]");
     const token = adminToken(flags);
     const pubkey = flagString(flags, "pubkey") || derivePublicKey(agent);
     let entitlements;
@@ -310,11 +314,12 @@ async function cmdAgents(config, flags) {
     }
 }
 async function cmdSecretPut(config, flags) {
-    const agent = flagString(flags, "agent") || die("用法：broker secret-put --agent <id> --name <key> （值由 stdin 讀）");
-    const name = flagString(flags, "name") || die("缺 --name");
-    const value = flagString(flags, "value") ?? node_fs_1.default.readFileSync(0, "utf8").replace(/\n$/, "");
+    const agent = flagString(flags, "agent") || usageDie("用法：broker secret-put --agent <id> --name <key> （值由 stdin 讀）");
+    const name = flagString(flags, "name") || usageDie("缺 --name");
+    const rawInput = node_fs_1.default.readFileSync(0, "utf8"); // 值只經 stdin，禁止 --value（argv 會外洩）
+    const value = rawInput.replace(/\n$/, "");
     if (!value)
-        die("值為空");
+        usageDie("值為空（值只可以經 stdin 提供）");
     const res = await callBroker(config, "PUT", `/v1/secrets/${agent}/${name}`, { value }, adminToken(flags));
     if (res.status !== 201)
         die(`寫入失敗：HTTP ${res.status}`);
@@ -380,7 +385,7 @@ async function cmdClaim(config, flags, keys) {
 }
 async function cmdExec(config, flags, command) {
     if (command.length === 0)
-        die("用法：broker exec [--keys github] -- <command...>");
+        usageDie("用法：broker exec [--keys github] -- <command...>");
     const agent = resolveAgent(config, flags);
     const keys = (flagString(flags, "keys") || "github").split(",").map((s) => s.trim()).filter(Boolean);
     const result = await doClaim(config, agent, keys);
@@ -406,7 +411,7 @@ function cmdRotate(config, flags) {
 async function cmdAdminLogin(flags) {
     const token = flags["token-stdin"] ? node_fs_1.default.readFileSync(0, "utf8").trim() : flagString(flags, "token");
     if (!token)
-        die("用法：broker admin-login --token-stdin（由 stdin 讀 admin token）");
+        usageDie("用法：broker admin-login --token-stdin（由 stdin 讀 admin token）");
     if (isMac) {
         const res = (0, node_child_process_1.spawnSync)("security", ["add-generic-password", "-U", "-s", ADMIN_KEYCHAIN_SERVICE, "-a", "admin", "-w", token], {
             encoding: "utf8",
@@ -427,7 +432,7 @@ function usage() {
   broker pubkey [--agent <id>]                                 由私鑰推導公鑰（register 用，唔需要抄）
   broker health                                                檢查 broker
 
-  broker claim [key...] [--print|--env|--json] [-agent <id>]   取 secret（預設遮罩摘要）
+  broker claim [key...] [--print|--env|--json] [--agent <id>]   取 secret（預設遮罩摘要）
   broker exec [--keys github] -- <command...>                  取 secret 後注入環境變數再跑命令
 
   broker register --agent <id> [--pubkey <raw>] [--entitlements a,b]   [admin] 登記 / 輪替公鑰
@@ -440,6 +445,9 @@ function usage() {
   BROKER_ADMIN_TOKEN   admin token（否則讀 Keychain service ${ADMIN_KEYCHAIN_SERVICE}）
   BROKER_AGENT_ID      預設 agent id
   BROKER_URL           覆蓋 broker 網址（等同 init 時 --broker-url）
+
+安全慣例:
+  所有 secret 值只經 stdin／Keychain／env 提供；CLI 刻意唔接受 --value / --admin-token（argv 會外洩）。
 
 慣例:
   github  → GH_TOKEN / GITHUB_TOKEN
@@ -507,9 +515,11 @@ async function main() {
         case "help":
         case "--help":
         case "-h":
-        case undefined:
             usage();
             return;
+        case undefined:
+            usage();
+            process.exit(2);
         default:
             console.error(`未知指令：${cmd}`);
             usage();
