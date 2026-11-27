@@ -92,7 +92,7 @@ let claimRes = { status: 1, stdout: "", stderr: "" };
 try {
   const out = await execFileAsync(
     process.execPath,
-    [path.join(root, "dist/index.js"), "claim", NAME, "--print", "--agent", AGENT],
+    [path.join(root, "dist/index.js"), "claim", NAME, "--json", "--agent", AGENT],
     { env: { ...env, BROKER_URL: `http://127.0.0.1:${port}` }, encoding: "utf8", timeout: 20000 },
   );
   claimRes = { status: 0, stdout: out.stdout, stderr: out.stderr };

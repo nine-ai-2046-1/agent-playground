@@ -288,7 +288,7 @@ broker exec -- gh pr list
 | `broker health` | 檢查 broker 可達性（`/health`） |
 | `broker pubkey` | 由私鑰推導公鑰（貼上 Cloudflare 用，唔需要抄） |
 | `broker ask-register` | 印出要人手寫入 Cloudflare KV 嘅 agent JSON |
-| `broker claim [key…] [--print\|--env\|--json]` | 簽名 claim；預設遮罩 |
+| `broker claim [key…] [--print\|--env\|--json]` | 簽名 claim；預設遮罩。`--print` 只印**純值**（限單一 key，非 TTY 會警告會留痕）；`--json` 印結構化 JSON |
 | `broker exec [--keys a,b] -- <cmd…>` | claim 後注入環境變數執行（推薦） |
 | `broker rotate` | 換 keypair（舊公鑰即刻失效；新公鑰要喺 Cloudflare 更新） |
 | `broker version \| --version \| -v` | 印版本 |
@@ -487,7 +487,7 @@ broker claim openai.api_key --print
 
 **X25519 公鑰點嚟？** 由同一條 Ed25519 私鑰確定性衍生（`SHA-512(seed)` 前半 + clamp），所以舊 agent **唔需要重新 init**、唔需要新 storage；`broker init`／`ask-register` 會自動印／寫入 `enc_pubkey` 欄位。
 
-`BROKER_MASTER_KEY` 由 N3 遺留落嚟，只用嚟讀舊 `v:1` secret；如果 KV 內全部轉晒 v2，呢個 secret 可以刪。
+`BROKER_MASTER_KEY` 由 N3 遺留落嚟，只用嚟讀舊 `v:1` secret。**2026-11-27 已喺生產刪除**（KV 內 `sec:*` = 0 個，冇任何 v1 信封需要解）；Worker secrets 只剩 `GITHUB_APP_ID`、`GITHUB_APP_PEM_BASE64`。
 
 ## CI 驗證（生產 E2E）
 
@@ -508,7 +508,7 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 1. **Cloudflare Access 未開**：Zero Trust Free 要綁信用卡（$0 但要授權超額收費），所以邊緣層未有 Access Service Token；現時保護全靠 Worker 內簽名驗證。
 2. registry 只可以由 Cloudflare 帳號寫入（已冇 admin API）。**Cloudflare 帳號 = 唯一 root of trust**：請務必開 2FA、用最小權限 API token。
 3. **源碼公開嘅前提**（2026-11-27 已做全歷史掃描：52 commit／3 ref／25 run log 零真 secret）：Worker 冇 admin API、KV 只存公鑰／密文、CLI 冇 delete 能力，所以 source 公開唔等於畀人入去；**唯一 root of trust 仍然係 Cloudflare 帳號**（請開 2FA、用最小權限 token）。公開後 `wrangler.toml` 內 KV／D1 id 同 worker 名係可見嘅（呢啲係識別碼，唔係憑證）。
-4. **私鑰單點（v2）**：agent 私鑰遺失＝永久解唔到已密封嘅 secret（依定案「失鑰不救」，要用 `broker rotate` 換 keypair 再重新 seal 全部 secret）。舊 `v:1` 信封另需 `BROKER_MASTER_KEY`（只為向後兼容而保留）。
+4. **私鑰單點（v2）**：agent 私鑰遺失＝永久解唔到已密封嘅 secret（依定案「失鑰不救」，要用 `broker rotate` 換 keypair 再重新 seal 全部 secret）。舊 `v:1` 信封本來要 `BROKER_MASTER_KEY`，該 secret 已刪；如日後真係有 v1 信封，Worker 會回 `503 encryption_not_configured`（fail closed）。
 4. `wants` 最多 12 項，`repositories` 最多 20 個。
 5. 舊 bearer endpoint 仍然存在，文件齊備後應下架。
 

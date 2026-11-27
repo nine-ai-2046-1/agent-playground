@@ -509,8 +509,22 @@ async function cmdClaim(config: Config, flags: Record<string, string | true>, ke
     }
     return;
   }
-  if (flags.json || flags.print) {
+  if (flags.json) {
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (flags.print) {
+    // L-2：--print 只出「純值」，唔再出整份 JSON（避免同 --json 混淆）
+    const keysWanted = Object.keys(result.secrets);
+    if (keysWanted.length !== 1) {
+      usageDie("--print 只支援單一 key；多個 key 請用 --json（意外留痕風險較高，會出警告）");
+    }
+    if (!process.stdout.isTTY) {
+      console.error("⚠ --print 會將 secret 原文寫落 stdout；如果被重定向／入 CI log，會永久留痕。");
+    }
+    const only = result.secrets[keysWanted[0]];
+    const raw = only.token ?? only.value ?? "";
+    console.log(typeof raw === "string" ? raw : JSON.stringify(raw));
     return;
   }
   console.log(`✔ ${result.agent_id} claimed: ${Object.keys(result.secrets).join(", ")}`);

@@ -252,7 +252,7 @@ async function getAgent(env, agentId) {
 async function resolveSecret(env, agentId, name, agent) {
   if (name === "github") {
     const gh = agent.github || {};
-    if (!gh.installation_id) throw Object.assign(new Error("github_not_configured"), { status: 403 });
+    if (!gh.installation_id) throw Object.assign(new Error("github_not_configured"), { status: 503 });
     return mintInstallationToken(env, String(gh.installation_id), {
       repositories: gh.repositories,
       permissions: gh.permissions,
@@ -398,6 +398,13 @@ async function bumpD1Rate(env, scope, subject, win, conf, now) {
     .bind(scope, subject, win)
     .first();
   const used = Number((row && row.used) || 1);
+  // 衞生：偶爾清走舊窗（window 係分鐘序號；保留最近 5 個窗以內）
+  if (Math.random() < 0.03) {
+    await env.AUDIT_DB.prepare("DELETE FROM rate_limit WHERE window < ?1")
+      .bind(win - 5)
+      .run()
+      .catch(() => {});
+  }
   if (used > conf.limit) {
     return { allowed: false, used, limit: conf.limit, retryAfter: conf.window - (now % conf.window), source: "d1" };
   }

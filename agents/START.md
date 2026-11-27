@@ -31,7 +31,7 @@ broker health             # broker 可達 + kv + ed25519
 | **agent_id** | 你嘅身份（例如 `opencode-01`）| 一個 id 對應一對密鑰；換機 = 換身份 |
 | **entitlement** | 你被准許拿邊幾個 key | 冇在清單入面 = 403，唔係 bug |
 | **key name** | secret 名字，例如 `github`、`smtp.password` | `github` 係特殊 key：即時 mint installation token |
-| **mask** | 預設只印 `sha256:… len=N` | 想睇原文必須明示 `--print` / `--env` / `exec` |
+| **mask** | 預設只印 `sha256:… len=N` | 想睇原文必須明示 `--print`（純值、限單一 key）/ `--env` / `exec` |
 
 重要：**你唔會預先知道全部 entitlement**。做法係「需要邊個就 claim 邊個」，403 就當「我冇呢個權」，向上報，唔好亂猜下一個名字。
 
@@ -57,7 +57,7 @@ eval "$(broker claim github --env)"
 | :-- | :-- |
 | `broker whoami` / `broker health` | 每次開工前自檢 |
 | `broker claim [key…]` | 拿 secret（預設遮罩）|
-| `broker claim --print` | 拿原文 JSON |
+| `broker claim <key> --print` | 只印**純值**（單一 key；非 TTY 會出留痕警告） |
 | `broker claim --env` | 印 `export KEY='value'`，配 `eval` |
 | `broker exec --keys a,b -- <cmd>` | **推薦**：注入 env 跑命令 |
 | `broker pubkey` / `broker ask-register` | 只在登記／換機時用（交出 JSON 俾 Cloudflare 帳號持有人）|
@@ -92,7 +92,8 @@ broker exec --keys github -- sh -c 'git push "https://x-access-token:$GH_TOKEN@g
 **SMTP / API key**
 ```bash
 broker exec --keys smtp.password -- python3 send_mail.py
-broker claim api.key --print | jq -r .secrets["api.key"].value
+broker claim api.key --print        # 直接輸出純值
+broker claim api.key --json | jq -r '.secrets["api.key"].value'  # 要結構時用 --json
 ```
 
 ## 7. 失敗處理（用退出碼分流）

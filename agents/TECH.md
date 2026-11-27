@@ -251,7 +251,7 @@ npx wrangler deploy
 ```bash
 # N3 master key（一次性；輪替前要先加舊 key 支援解密，見 README 已知限制）
 node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64url"))' > ~/Doubao/secrets/broker-master-key.b64
-npx wrangler secret put BROKER_MASTER_KEY < ~/Doubao/secrets/broker-master-key.b64
+# （已唔需要）如要臨時復原 v1 讀取能力：npx wrangler secret put BROKER_MASTER_KEY < ~/Doubao/secrets/broker-master-key.b64
 npx wrangler deploy
 ```
 KV：`wrangler.toml` 內 `[[kv_namespaces]] binding = "BROKER_KV"`。

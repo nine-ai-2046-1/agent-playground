@@ -71,7 +71,7 @@ Cloudflare Worker 做 secret broker：每個 agent 用**本機 Ed25519 私鑰**�
 | C9 | PEM 不出 Cloudflare | 靜態審：PEM 只出現在 `env.GITHUB_APP_PEM_BASE64` 使用處，冇寫入 KV／response／log | 待你驗 |
 | C10 | 錯誤訊息唔洩敏感資訊 | 觸發 401／403／404／500，檢查 body 同 log 有冇 secret 值或內部 path | 待你驗 |
 | C11 | audit log 可追誰拿了什麼 | 檢查 `audit()` 欄位（agent_id、wants、result、delivered、ip、ua），且**無 secret 值** | 待你驗 |
-| C12 | 預設唔會 print secret 原文 | `broker claim` 預設遮罩；`--print`/`--env`/`exec` 才出原文 | 待你驗 |
+| C12 | 預設唔會 print secret 原文 | `broker claim` 預設遮罩；`--print` 只出**純值**（限單一 key，非 TTY 出警告）、`--env`／`exec` 才注入 | ✅ 已核（2026-11-27 L-2 修） |
 
 ---
 
@@ -317,7 +317,7 @@ audit/<YYYY-MM-DD>/
 | ID | 問題 | 建議 |
 | :-- | :-- | :-- |
 | L-1 | 單 key 全失敗回 **500**（`github_not_configured` 實為設定缺失） | 改 503，令 CLI／上層可分辨「設定缺失」vs「真故障」 |
-| L-2 | `claim --print` 輸出係 JSON（同 `--json` 幾乎相同），非純值 | 文件寫清或改純值 |
+| L-2 | `claim --print` 輸出係 JSON（同 `--json` 幾乎相同），非純值 | ✅ **已修（2026-11-27）**：`--print` 改為只印純值、限單一 key；`--json` 保持結構化；非 TTY 出「會留痕」警告；密封測試改用 `--json` |
 | L-3 | ~~非 macOS `admin-login` 持久化~~ | **作廢（N7）**：`admin-login` 已刪 |
 
 **仍未做的環境**：Lima VM 未安裝（本機冇 `limactl`；OrbStack daemon 未起）。雲主機已提供乾淨 Linux，故未重複搭建。
@@ -348,4 +348,4 @@ run `45977991426`（commit `2d8c02d`）**success**；報告 `e2e-report.json` �
 | 撤銷該 token | GitHub 無公開撤銷 installation token 端點（`DELETE /installation/tokens` 以 installation token／App JWT 皆 404）；該 token 於 `2026-11-27T10:53:51Z` 到期，實測 `401` 已失效 |
 | 防止再犯 | workflow 改為只輸出 `prefix`／`len`／`expires_at`，token 明文只寫 `/tmp/claim.json` 並即時 `rm`，永不入 log／報告 |
 
-**結論**：NIN-183「生產 E2E 做唔到」嘅阻塞已解除（唔再依賴本機／雲機出口）。仍未做：`github_not_configured` 應回 503（L-1）、`claim --print` 語意（L-2）。N2–N6 已完成，N7 已落地（待部署）。
+**結論**：NIN-183「生產 E2E 做唔到」嘅阻塞已解除（唔再依賴本機／雲機出口）。L-1（`github_not_configured` → 503）同 L-2（`--print` 語意）已於 2026-11-27 修好。N2–N6 已完成，N7 已落地（待部署）。
