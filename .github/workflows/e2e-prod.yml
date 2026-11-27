@@ -111,10 +111,29 @@ jobs:
 
       - name: 寫報告
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
-          node -e '
-          const fs=require("fs");
-          const ok = process.env.JOB_STATUS === "success";
+          python3 - <<'PY'
+          import json, os, pathlib, datetime
+          diag = None
+          f = pathlib.Path("/tmp/claim.diag")
+          if f.exists():
+              diag = f.read_text(errors="replace")[-1200:]
+          rep = {
+              "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "commit": os.environ.get("GITHUB_SHA"),
+              "runner": os.environ.get("RUNNER_NAME"),
+              "broker": os.environ.get("BROKER_URL"),
+              "agent": os.environ.get("BROKER_AGENT_ID"),
+              "hasKey": os.environ.get("HAS_KEY") == "true",
+              "result": "success" if os.environ.get("JOB_STATUS") == "success" else "failed",
+              "runUrl": f"{os.environ.get('GITHUB_SERVER_URL')}/{os.environ.get('GITHUB_REPOSITORY')}/actions/runs/{os.environ.get('GITHUB_RUN_ID')}",
+              "diag": diag,
+          }
+          pathlib.Path("e2e-report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=2) + "\n")
+          print(json.dumps(rep, ensure_ascii=False))
+          PY
           const rep = {
             at: new Date().toISOString(),
             commit: process.env.GITHUB_SHA,
