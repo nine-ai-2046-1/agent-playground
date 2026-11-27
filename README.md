@@ -527,3 +527,13 @@ Repo secrets（Settings → Secrets and variables → Actions）：
 | `agents/AUDIT.md` | audit agent | 宣稱清單、控制清單、風險登記冊（P0–P2）、audit playbook、測試案例、證據要求 |
 
 審核基線（2026-11-27 N7 後）：Worker 只暴露 `/health` + `/v1/claim`，admin API 全撤；契約測試 22/22；D1 `broker-audit` 有 `machine_id` 欄；Access 未開。
+
+## 授權（License）
+
+**MIT** — 見 [`LICENSE`](LICENSE)。你可以自由使用、修改、再分發，只需保留版權聲明。
+
+## 版本政策
+
+- 現階段**只保留一個 release**：`v0.6.0`（安裝腳本默認 pin 呢個）。
+- 舊 tag（`v0.4.0`、`v0.5.0`）同其 asset 已刪除，避免有人裝到過時版本。
+- 出新版本時：升 `package.json` 版本 → 出 tarball＋`.sha256` → 打 tag → 更新 `REL_TAG` 默認 → 刪舊 release（保留最後一個穩定版做回滾選項由你決定）。
