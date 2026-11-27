@@ -496,7 +496,7 @@ export default {
             version: "v2",
             kv: Boolean(env.BROKER_KV),
             ed25519: true,
-            encryption: Boolean(masterKeyBytes(env)),
+            encryption: Boolean(masterKeyBytes(env)), // 只代表「有冇 N3 v1 master key」；v2 密封唔需要
             audit: Boolean(env.AUDIT_DB),
             rate_limit: true,
           },
